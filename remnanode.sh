@@ -1801,17 +1801,16 @@ tblocker_unban_ip() {
         iptables $delete_rule 2>/dev/null || true
     done
 
-    # 3. Remove from blocked_ips.json (reset to clean state)
+    # 3. Remove from blocked_ips.json
+    # Format: map[string]BlockedIP → {"1.2.3.4": {...}, ...}
     local blocked_file="$storage_dir/blocked_ips.json"
     if [ -f "$blocked_file" ] && grep -q "$unban_ip" "$blocked_file" 2>/dev/null; then
-        # Use jq if available, otherwise reset to []
         if command -v jq >/dev/null 2>&1; then
-            jq "del(.\"$unban_ip\") // del(.[] | select(. == \"$unban_ip\" or .ip == \"$unban_ip\"))" \
-                "$blocked_file" > "$blocked_file.tmp" 2>/dev/null && \
+            jq "del(.\"$unban_ip\")" "$blocked_file" > "$blocked_file.tmp" 2>/dev/null && \
                 mv -f "$blocked_file.tmp" "$blocked_file" || \
-                echo "[]" > "$blocked_file"
+                echo "{}" > "$blocked_file"
         else
-            echo "[]" > "$blocked_file"
+            echo "{}" > "$blocked_file"
         fi
         colorized_echo green "✅ Удалён из blocked_ips.json"
         removed=true
