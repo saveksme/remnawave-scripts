@@ -593,151 +593,162 @@ EOL
 
 setup_log_rotation() {
     check_running_as_root
-    
-    # Check if the directory exists
-    if [ ! -d "$DATA_DIR" ]; then
-        colorized_echo blue "Creating directory $DATA_DIR"
-        mkdir -p "$DATA_DIR"
-    else
-        colorized_echo green "Directory $DATA_DIR already exists"
-    fi
-    
-    # Check if logrotate is installed
-    if ! command -v logrotate &> /dev/null; then
-        colorized_echo blue "Installing logrotate"
+
+    clear
+    echo -e "\033[1;37m🗂️  Log Rotation Setup\033[0m"
+    echo -e "\033[38;5;8m$(printf '─%.0s' $(seq 1 55))\033[0m"
+    echo
+
+    # ── 1. Ensure logrotate is installed ──────────────────────────────
+    if ! command -v logrotate &>/dev/null; then
+        colorized_echo cyan "📦 Устанавливаем logrotate..."
         detect_os
         install_package logrotate
     else
-        colorized_echo green "Logrotate is already installed"
+        colorized_echo green "✅ logrotate установлен"
     fi
-    
-    # Check if logrotate config already exists
-    LOGROTATE_CONFIG="/etc/logrotate.d/remnanode"
+    echo
+
+    # ── 2. Collect log paths from docker-compose.yml ─────────────────
+    local compose_log_dirs=()
+
+    if [ -f "$COMPOSE_FILE" ]; then
+        colorized_echo cyan "🔍 Читаем volumes из $COMPOSE_FILE..."
+        echo
+
+        # Extract host-side paths from "- /host/path:/container/path" lines
+        while IFS= read -r line; do
+            # Strip leading whitespace and the leading "- "
+            local vol
+            vol=$(echo "$line" | sed 's/^[[:space:]]*-[[:space:]]*//')
+            # Take the host part (before the first ":")
+            local host_path
+            host_path=$(echo "$vol" | cut -d: -f1)
+            # Skip commented-out or empty entries
+            [[ "$host_path" == \#* ]] && continue
+            [[ -z "$host_path" ]] && continue
+            # Keep only paths that look like log locations
+            if echo "$host_path" | grep -qiE '(log|logs)'; then
+                compose_log_dirs+=("$host_path")
+            fi
+        done < <(grep -E '^\s+-\s+/' "$COMPOSE_FILE")
+    fi
+
+    # Always include $LOG_DIR as a baseline
+    local already_has_logdir=false
+    for d in "${compose_log_dirs[@]}"; do
+        [ "$d" = "$LOG_DIR" ] && already_has_logdir=true && break
+    done
+    $already_has_logdir || compose_log_dirs+=("$LOG_DIR")
+
+    # Deduplicate
+    local unique_dirs=()
+    declare -A _seen
+    for d in "${compose_log_dirs[@]}"; do
+        [ "${_seen[$d]+_}" ] && continue
+        _seen[$d]=1
+        unique_dirs+=("$d")
+    done
+
+    # ── 3. Show discovered paths ──────────────────────────────────────
+    colorized_echo white "📂 Найденные лог-директории:"
+    for d in "${unique_dirs[@]}"; do
+        if [ -d "$d" ]; then
+            local cnt
+            cnt=$(find "$d" -maxdepth 1 -name "*.log" 2>/dev/null | wc -l)
+            printf "   \033[38;5;15m%-40s\033[0m \033[38;5;244m%s файлов .log\033[0m\n" "$d" "$cnt"
+        else
+            printf "   \033[38;5;15m%-40s\033[0m \033[38;5;244m(директория не существует)\033[0m\n" "$d"
+        fi
+    done
+    echo
+
+    # ── 4. Ask parameters ─────────────────────────────────────────────
+    colorized_echo cyan "⚙️  Параметры logrotate (Enter = значение по умолчанию):"
+    echo
+
+    local rotate size period
+    read -p "$(echo -e "   \033[38;5;15mКол-во архивов\033[0m (rotate) [\033[38;5;117m14\033[0m]: ")" rotate
+    rotate=${rotate:-14}
+
+    read -p "$(echo -e "   \033[38;5;15mМакс. размер файла\033[0m      [\033[38;5;117m50M\033[0m]: ")" size
+    size=${size:-50M}
+
+    echo -e "   \033[38;5;244mПериод ротации: daily / weekly / monthly\033[0m"
+    read -p "$(echo -e "   \033[38;5;15mПериод\033[0m                   [\033[38;5;117mdaily\033[0m]: ")" period
+    period=${period:-daily}
+    # Validate period
+    case "$period" in
+        daily|weekly|monthly) ;;
+        *) colorized_echo yellow "   Неизвестный период, используем 'daily'"; period="daily" ;;
+    esac
+
+    echo
+
+    # ── 5. Write logrotate config ─────────────────────────────────────
+    local LOGROTATE_CONFIG="/etc/logrotate.d/$APP_NAME"
+
     if [ -f "$LOGROTATE_CONFIG" ]; then
-        colorized_echo yellow "Logrotate configuration already exists at $LOGROTATE_CONFIG"
-        read -p "Do you want to overwrite it? (y/n): " -r overwrite
+        colorized_echo yellow "⚠️  Конфиг $LOGROTATE_CONFIG уже существует"
+        read -p "   Перезаписать? [y/N]: " -r overwrite
         if [[ ! $overwrite =~ ^[Yy]$ ]]; then
-            colorized_echo yellow "Keeping existing logrotate configuration"
-            return
+            colorized_echo gray "   Оставляем существующий конфиг"
+            return 0
         fi
     fi
-    
-    # Create logrotate configuration
-    colorized_echo blue "Creating logrotate configuration at $LOGROTATE_CONFIG"
-    cat > "$LOGROTATE_CONFIG" <<EOL
-$DATA_DIR/*.log {
-    size 50M
-    rotate 5
-    compress
-    missingok
-    notifempty
-    copytruncate
-}
-EOL
+
+    colorized_echo cyan "📝 Записываем $LOGROTATE_CONFIG..."
+
+    # Ensure directories exist
+    for d in "${unique_dirs[@]}"; do
+        mkdir -p "$d"
+    done
+
+    # Build config: one block per directory
+    {
+        for d in "${unique_dirs[@]}"; do
+            echo "$d/*.log {"
+            echo "    $period"
+            echo "    size $size"
+            echo "    rotate $rotate"
+            echo "    compress"
+            echo "    delaycompress"
+            echo "    missingok"
+            echo "    notifempty"
+            echo "    copytruncate"
+            echo "}"
+            echo
+        done
+    } > "$LOGROTATE_CONFIG"
 
     chmod 644 "$LOGROTATE_CONFIG"
-    
-    # Test logrotate configuration
-    colorized_echo blue "Testing logrotate configuration"
-    if logrotate -d "$LOGROTATE_CONFIG" &> /dev/null; then
-        colorized_echo green "Logrotate configuration test successful"
-        
-        # Ask if user wants to run logrotate now
-        read -p "Do you want to run logrotate now? (y/n): " -r run_now
+
+    # ── 6. Test and optionally run ────────────────────────────────────
+    if logrotate -d "$LOGROTATE_CONFIG" &>/dev/null; then
+        colorized_echo green "✅ Конфигурация корректна"
+        echo
+        colorized_echo white "📋 Итоговые настройки:"
+        printf "   \033[38;5;15m%-14s\033[0m \033[38;5;117m%s\033[0m\n" "Период:" "$period"
+        printf "   \033[38;5;15m%-14s\033[0m \033[38;5;117m%s\033[0m\n" "Макс. размер:" "$size"
+        printf "   \033[38;5;15m%-14s\033[0m \033[38;5;117m%s архивов\033[0m\n" "Хранить:" "$rotate"
+        printf "   \033[38;5;15m%-14s\033[0m \033[38;5;117m%s\033[0m\n" "Конфиг:" "$LOGROTATE_CONFIG"
+        echo
+        read -p "Запустить logrotate сейчас (принудительно)? [y/N]: " -r run_now
         if [[ $run_now =~ ^[Yy]$ ]]; then
-            colorized_echo blue "Running logrotate"
-            if logrotate -vf "$LOGROTATE_CONFIG"; then
-                colorized_echo green "Logrotate executed successfully"
+            colorized_echo cyan "🔄 Запускаем logrotate..."
+            if logrotate -vf "$LOGROTATE_CONFIG" 2>&1 | tail -5; then
+                colorized_echo green "✅ Logrotate выполнен успешно"
             else
-                colorized_echo red "Error running logrotate"
+                colorized_echo red "❌ Ошибка при выполнении logrotate"
             fi
         fi
     else
-        colorized_echo red "Logrotate configuration test failed"
+        colorized_echo red "❌ Ошибка в конфигурации logrotate:"
         logrotate -d "$LOGROTATE_CONFIG"
+        return 1
     fi
-    
-    # Update docker-compose.yml to mount logs directory
-    if [ -f "$COMPOSE_FILE" ]; then
-        colorized_echo blue "Updating docker-compose.yml to mount logs directory"
-        
 
-        colorized_echo blue "Creating backup of docker-compose.yml..."
-        backup_file=$(create_backup "$COMPOSE_FILE")
-        if [ $? -eq 0 ]; then
-            colorized_echo green "Backup created: $backup_file"
-        else
-            colorized_echo red "Failed to create backup"
-            return
-        fi
-        
-
-        local service_indent=$(get_service_property_indentation "$COMPOSE_FILE")
-        local indent_type=""
-        if [[ "$service_indent" =~ $'\t' ]]; then
-            indent_type=$'\t'
-        else
-            indent_type="  "
-        fi
-        local volume_item_indent="${service_indent}${indent_type}"
-        
-
-        local escaped_service_indent=$(escape_for_sed "$service_indent")
-        local escaped_volume_item_indent=$(escape_for_sed "$volume_item_indent")
-        
-
-        if grep -q "^${escaped_service_indent}volumes:" "$COMPOSE_FILE"; then
-            if ! grep -q "$DATA_DIR:$DATA_DIR" "$COMPOSE_FILE"; then
-                sed -i "/^${escaped_service_indent}volumes:/a\\${volume_item_indent}- $DATA_DIR:$DATA_DIR" "$COMPOSE_FILE"
-                colorized_echo green "Added logs volume to existing volumes section"
-            else
-                colorized_echo yellow "Logs volume already exists in volumes section"
-            fi
-        elif grep -q "^${escaped_service_indent}# volumes:" "$COMPOSE_FILE"; then
-            sed -i "s|^${escaped_service_indent}# volumes:|${service_indent}volumes:|g" "$COMPOSE_FILE"
-            
-            if grep -q "^${escaped_volume_item_indent}#.*$DATA_DIR:$DATA_DIR" "$COMPOSE_FILE"; then
-                sed -i "s|^${escaped_volume_item_indent}#.*$DATA_DIR:$DATA_DIR|${volume_item_indent}- $DATA_DIR:$DATA_DIR|g" "$COMPOSE_FILE"
-                colorized_echo green "Uncommented volumes section and logs volume line"
-            else
-                sed -i "/^${escaped_service_indent}volumes:/a\\${volume_item_indent}- $DATA_DIR:$DATA_DIR" "$COMPOSE_FILE"
-                colorized_echo green "Uncommented volumes section and added logs volume line"
-            fi
-        else
-            sed -i "/^${escaped_service_indent}restart: always/a\\${service_indent}volumes:\\n${volume_item_indent}- $DATA_DIR:$DATA_DIR" "$COMPOSE_FILE"
-            colorized_echo green "Added new volumes section with logs volume"
-        fi
-        
-
-        colorized_echo blue "Validating docker-compose.yml..."
-        if validate_compose_file "$COMPOSE_FILE"; then
-            colorized_echo green "Docker-compose.yml validation successful"
-            cleanup_old_backups "$COMPOSE_FILE"
-
-            if is_remnanode_up; then
-                read -p "Do you want to restart RemnaNode to apply changes? (y/n): " -r restart_now
-                if [[ $restart_now =~ ^[Yy]$ ]]; then
-                    colorized_echo blue "Restarting RemnaNode"
-                    restart_command -n
-                    colorized_echo green "RemnaNode restarted successfully"
-                else
-                    colorized_echo yellow "Remember to restart RemnaNode to apply changes"
-                fi
-            fi
-        else
-            colorized_echo red "Docker-compose.yml validation failed! Restoring backup..."
-            if restore_backup "$backup_file" "$COMPOSE_FILE"; then
-                colorized_echo green "Backup restored successfully"
-            else
-                colorized_echo red "Failed to restore backup!"
-            fi
-            return
-        fi
-    else
-        colorized_echo yellow "Docker Compose file not found. Log directory will be mounted on next installation."
-    fi
-    
-    colorized_echo green "Log rotation setup completed successfully"
+    colorized_echo green "✅ Log rotation настроен успешно"
 }
 
 # ============================================
