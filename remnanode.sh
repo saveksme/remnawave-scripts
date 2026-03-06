@@ -2514,7 +2514,6 @@ install_command() {
     configure_ipv6_integration
 
     up_remnanode
-    follow_remnanode_logs
 
     # final message
     clear
@@ -2523,27 +2522,27 @@ install_command() {
     echo -e "\033[1;37m🎉 RemnaNode Successfully Installed!\033[0m"
     echo -e "\033[38;5;8m$(printf '─%.0s' $(seq 1 70))\033[0m"
     echo
-    
+
     echo -e "\033[1;37m🌐 Connection Information:\033[0m"
     printf "   \033[38;5;15m%-12s\033[0m \033[38;5;250m%s\033[0m\n" "IP Address:" "$NODE_IP"
     printf "   \033[38;5;15m%-12s\033[0m \033[38;5;250m%s\033[0m\n" "Port:" "$NODE_PORT"
     printf "   \033[38;5;15m%-12s\033[0m \033[38;5;250m%s:%s\033[0m\n" "Full URL:" "$NODE_IP" "$NODE_PORT"
     echo
-    
+
     echo -e "\033[1;37m📋 Next Steps:\033[0m"
     echo -e "   \033[38;5;250m1.\033[0m Use the IP and port above to set up your Remnawave Panel"
     echo -e "   \033[38;5;250m2.\033[0m Log rotation for \033[38;5;15m$LOG_DIR\033[0m is already configured ✅"
-    
+
     if [ "$INSTALL_XRAY" == "true" ]; then
         echo -e "   \033[38;5;250m3.\033[0m \033[1;37mXray-core is already installed and ready! ✅\033[0m"
     else
         echo -e "   \033[38;5;250m3.\033[0m Install Xray-core: \033[38;5;15msudo $APP_NAME core-update\033[0m"
     fi
-    
+
     echo -e "   \033[38;5;250m4.\033[0m Secure with UFW: \033[38;5;15msudo ufw allow from \033[38;5;244mPANEL_IP\033[38;5;15m to any port $NODE_PORT\033[0m"
     echo -e "      \033[38;5;8m(Enable UFW: \033[38;5;15msudo ufw enable\033[38;5;8m)\033[0m"
     echo
-    
+
     echo -e "\033[1;37m🛠️  Quick Commands:\033[0m"
     printf "   \033[38;5;15m%-15s\033[0m %s\n" "status" "📊 Check service status"
     printf "   \033[38;5;15m%-15s\033[0m %s\n" "logs" "📋 View container logs"
@@ -2552,7 +2551,7 @@ install_command() {
         printf "   \033[38;5;15m%-15s\033[0m %s\n" "xray_log_out" "📤 View Xray logs"
     fi
     echo
-    
+
     echo -e "\033[1;37m📁 File Locations:\033[0m"
     printf "   \033[38;5;15m%-15s\033[0m \033[38;5;250m%s\033[0m\n" "Configuration:" "$APP_DIR"
     printf "   \033[38;5;15m%-15s\033[0m \033[38;5;250m%s\033[0m\n" "Data:" "$DATA_DIR"
@@ -2561,13 +2560,17 @@ install_command() {
         printf "   \033[38;5;15m%-15s\033[0m \033[38;5;250m%s\033[0m\n" "Xray Binary:" "$XRAY_FILE"
     fi
     echo
-    
+
     echo -e "\033[38;5;8m$(printf '─%.0s' $(seq 1 70))\033[0m"
     echo -e "\033[38;5;8m💡 For all commands: \033[38;5;15msudo $APP_NAME\033[0m"
     echo -e "\033[38;5;8m📚 Project: \033[38;5;250mhttps://gig.ovh\033[0m"
     echo -e "\033[38;5;8m$(printf '─%.0s' $(seq 1 70))\033[0m"
 
     print_xray_profile_config
+
+    echo
+    read -rp "$(echo -e "\033[38;5;244mНажмите Enter чтобы посмотреть логи контейнера (Ctrl+C чтобы выйти)...\033[0m")"
+    follow_remnanode_logs
 }
 
 uninstall_command() {
