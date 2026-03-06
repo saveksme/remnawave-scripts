@@ -263,6 +263,7 @@ ENV_FILE="$APP_DIR/.env"
 XRAY_FILE="$DATA_DIR/xray"
 GEOIP_FILE="$DATA_DIR/geoip.dat"
 GEOSITE_FILE="$DATA_DIR/geosite.dat"
+LOG_DIR="/var/log/$APP_NAME"
 
 # Default internal port (XTLS_API only, other internal ports now use unix sockets)
 DEFAULT_XTLS_API_PORT=61000
@@ -562,6 +563,34 @@ install_latest_xray_core() {
     colorized_echo green "Latest Xray-core (${latest_release}) installed at $XRAY_FILE"
 }
 
+# Auto-configure logrotate for /var/log/remnanode (called during install, no prompts)
+setup_varlog_rotation() {
+    local LOGROTATE_CONFIG="/etc/logrotate.d/$APP_NAME-logs"
+
+    colorized_echo blue "Configuring logrotate for $LOG_DIR"
+    mkdir -p "$LOG_DIR"
+
+    if ! command -v logrotate &> /dev/null; then
+        detect_os
+        install_package logrotate
+    fi
+
+    cat > "$LOGROTATE_CONFIG" <<EOL
+$LOG_DIR/*.log {
+    daily
+    missingok
+    rotate 14
+    compress
+    delaycompress
+    notifempty
+    copytruncate
+    size 50M
+}
+EOL
+    chmod 644 "$LOGROTATE_CONFIG"
+    colorized_echo green "✅ Logrotate configured for $LOG_DIR (daily, 14 days, 50MB max)"
+}
+
 setup_log_rotation() {
     check_running_as_root
     
@@ -765,15 +794,29 @@ enable_shm_volume() {
     return 1
 }
 
+# Install selfsteal (nginx-based) via DigneZzZ scripts
+install_selfsteal() {
+    echo
+    colorized_echo cyan "🚀 Installing Selfsteal (nginx)..."
+    echo
+    if bash <(curl -Ls https://github.com/DigneZzZ/remnawave-scripts/raw/main/selfsteal.sh) @ install --nginx; then
+        colorized_echo green "✅ Selfsteal installed successfully"
+        return 0
+    else
+        colorized_echo red "❌ Selfsteal installation failed"
+        return 1
+    fi
+}
+
 # Configure selfsteal socket access after installation
 configure_selfsteal_integration() {
     echo
     colorized_echo cyan "🔍 Checking for Selfsteal (nginx/caddy) installation..."
-    
+
     if check_selfsteal_socket; then
         colorized_echo green "✅ Detected selfsteal socket at $SELFSTEAL_SOCKET"
         colorized_echo blue "   Enabling socket access for remnanode container..."
-        
+
         if enable_shm_volume "$COMPOSE_FILE"; then
             colorized_echo green "✅ Remnanode configured for selfsteal socket access"
             echo
@@ -783,8 +826,36 @@ configure_selfsteal_integration() {
         fi
     else
         colorized_echo gray "   No selfsteal socket detected"
-        colorized_echo gray "   If you install selfsteal later with --nginx, run:"
-        colorized_echo white "   remnanode enable-socket"
+        echo
+        if [ "$FORCE_MODE" != "true" ]; then
+            colorized_echo cyan "💡 Selfsteal позволяет использовать ваш SSL-сертификат как прикрытие для Xray Reality."
+            read -p "Установить Selfsteal (nginx) прямо сейчас? [y/N]: " -r install_ss
+            if [[ $install_ss =~ ^[Yy]$ ]]; then
+                if install_selfsteal; then
+                    sleep 2
+                    if check_selfsteal_socket; then
+                        colorized_echo blue "   Enabling socket access for remnanode container..."
+                        if enable_shm_volume "$COMPOSE_FILE"; then
+                            colorized_echo green "✅ Remnanode configured for selfsteal socket access"
+                            echo
+                            colorized_echo cyan "📋 Xray Reality Configuration:"
+                            colorized_echo white "   \"target\": \"$SELFSTEAL_SOCKET\","
+                            colorized_echo white "   \"xver\": 1"
+                        fi
+                    else
+                        colorized_echo yellow "⚠️  Сокет selfsteal ещё не доступен. После запуска selfsteal выполните:"
+                        colorized_echo white "   remnanode enable-socket"
+                    fi
+                fi
+            else
+                colorized_echo gray "   Пропускаем установку selfsteal."
+                colorized_echo gray "   Для установки позже: bash <(curl -Ls https://github.com/DigneZzZ/remnawave-scripts/raw/main/selfsteal.sh) @ install --nginx"
+                colorized_echo gray "   Затем активируйте сокет: remnanode enable-socket"
+            fi
+        else
+            colorized_echo gray "   If you install selfsteal later, run:"
+            colorized_echo white "   remnanode enable-socket"
+        fi
     fi
 }
 
@@ -855,6 +926,9 @@ install_remnanode() {
 
     colorized_echo blue "Creating directory $DATA_DIR"
     mkdir -p "$DATA_DIR"
+
+    colorized_echo blue "Creating log directory $LOG_DIR"
+    mkdir -p "$LOG_DIR"
 
     # Get SECRET_KEY (from command line or interactive input)
     if [ -n "$FORCE_SECRET_KEY" ]; then
@@ -1063,14 +1137,14 @@ services:
         hard: 1048576
 EOL
 
-    # Add volumes section (commented by default)
+    # Add volumes section — log dir is always mounted
     if [ "$INSTALL_XRAY" == "true" ]; then
-        # If Xray is installed, add uncommented volumes section
+        # Xray installed: xray volumes + log dir, both uncommented
         cat >> "$COMPOSE_FILE" <<EOL
     volumes:
       - $XRAY_FILE:/usr/local/bin/xray
 EOL
-        
+
         # Add geo files if they exist
         if [ -f "$GEOIP_FILE" ]; then
             echo "      - $GEOIP_FILE:/usr/local/share/xray/geoip.dat" >> "$COMPOSE_FILE"
@@ -1078,20 +1152,21 @@ EOL
         if [ -f "$GEOSITE_FILE" ]; then
             echo "      - $GEOSITE_FILE:/usr/local/share/xray/geosite.dat" >> "$COMPOSE_FILE"
         fi
-        
+
         cat >> "$COMPOSE_FILE" <<EOL
-      # - $DATA_DIR:$DATA_DIR
+      - $LOG_DIR:$LOG_DIR
       # - /dev/shm:/dev/shm  # Uncomment for selfsteal socket access
 EOL
     else
-        # If Xray is not installed, add commented volumes section
+        # Xray not installed: log dir uncommented, xray mounts commented
         cat >> "$COMPOSE_FILE" <<EOL
-    # volumes:
-    #   - $XRAY_FILE:/usr/local/bin/xray
-    #   - $GEOIP_FILE:/usr/local/share/xray/geoip.dat
-    #   - $GEOSITE_FILE:/usr/local/share/xray/geosite.dat
-    #   - $DATA_DIR:$DATA_DIR
-    #   - /dev/shm:/dev/shm  # Uncomment for selfsteal socket access
+    volumes:
+      - $LOG_DIR:$LOG_DIR
+      # - /dev/shm:/dev/shm  # Uncomment for selfsteal socket access
+      # Uncomment below to use a custom Xray binary:
+      #   - $XRAY_FILE:/usr/local/bin/xray
+      #   - $GEOIP_FILE:/usr/local/share/xray/geoip.dat
+      #   - $GEOSITE_FILE:/usr/local/share/xray/geosite.dat
 EOL
     fi
 
@@ -1356,7 +1431,8 @@ install_command() {
     detect_compose
     install_remnanode_script
     install_remnanode
-    
+    setup_varlog_rotation
+
     # Check for selfsteal socket and enable volume if needed
     configure_selfsteal_integration
     
@@ -1379,7 +1455,7 @@ install_command() {
     
     echo -e "\033[1;37m📋 Next Steps:\033[0m"
     echo -e "   \033[38;5;250m1.\033[0m Use the IP and port above to set up your Remnawave Panel"
-    echo -e "   \033[38;5;250m2.\033[0m Configure log rotation: \033[38;5;15msudo $APP_NAME setup-logs\033[0m"
+    echo -e "   \033[38;5;250m2.\033[0m Log rotation for \033[38;5;15m$LOG_DIR\033[0m is already configured ✅"
     
     if [ "$INSTALL_XRAY" == "true" ]; then
         echo -e "   \033[38;5;250m3.\033[0m \033[1;37mXray-core is already installed and ready! ✅\033[0m"
@@ -1403,6 +1479,7 @@ install_command() {
     echo -e "\033[1;37m📁 File Locations:\033[0m"
     printf "   \033[38;5;15m%-15s\033[0m \033[38;5;250m%s\033[0m\n" "Configuration:" "$APP_DIR"
     printf "   \033[38;5;15m%-15s\033[0m \033[38;5;250m%s\033[0m\n" "Data:" "$DATA_DIR"
+    printf "   \033[38;5;15m%-15s\033[0m \033[38;5;250m%s\033[0m\n" "Logs:" "$LOG_DIR"
     if [ "$INSTALL_XRAY" == "true" ]; then
         printf "   \033[38;5;15m%-15s\033[0m \033[38;5;250m%s\033[0m\n" "Xray Binary:" "$XRAY_FILE"
     fi
