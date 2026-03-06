@@ -1724,7 +1724,7 @@ tblocker_list_banned() {
 
     # iptables: auto-detect chain
     local chain
-    chain=$(tblocker_detect_chain)
+    chain=$(tblocker_detect_chain) || true
     if [ -n "$chain" ]; then
         local rule_count
         rule_count=$(iptables -L "$chain" -n 2>/dev/null | grep -cE "DROP|REJECT" || echo 0)
@@ -1793,7 +1793,7 @@ tblocker_ban_ip() {
     fi
 
     # iptables: find chain (even if empty — for adding rules)
-    local chain; chain=$(tblocker_detect_chain false)
+    local chain; chain=$(tblocker_detect_chain false) || true
 
     if [ -n "$chain" ]; then
         if iptables -I "$chain" 1 -s "$ban_ip" -j DROP 2>/dev/null; then
@@ -1830,7 +1830,7 @@ tblocker_unban_ip() {
     fi
 
     # iptables: find the chain that has rules
-    local chain; chain=$(tblocker_detect_chain)
+    local chain; chain=$(tblocker_detect_chain) || true
 
     if [ -n "$chain" ]; then
         echo
