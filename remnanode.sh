@@ -1256,6 +1256,294 @@ fail2ban_menu() {
     done
 }
 
+# =====================================
+# XRAY TORRENT BLOCKER
+# =====================================
+
+TORRENT_SERVICE="remnanode-torrent-blocker"
+TORRENT_SERVICE_FILE="/etc/systemd/system/${TORRENT_SERVICE}.service"
+TORRENT_APPLY_SCRIPT="/usr/local/bin/${TORRENT_SERVICE}"
+
+get_xtls_api_port() {
+    local port
+    port=$(grep -E "^XTLS_API_PORT=" "$APP_DIR/.env" 2>/dev/null | cut -d= -f2 | tr -d '[:space:]')
+    echo "${port:-${DEFAULT_XTLS_API_PORT:-61000}}"
+}
+
+is_torrent_blocker_installed() {
+    [ -f "$TORRENT_SERVICE_FILE" ]
+}
+
+is_torrent_blocker_active() {
+    systemctl is-active --quiet "$TORRENT_SERVICE" 2>/dev/null
+}
+
+install_torrent_blocker() {
+    local api_port
+    api_port=$(get_xtls_api_port)
+
+    # Create the apply script that runs on every container start
+    cat > "$TORRENT_APPLY_SCRIPT" << SCRIPT
+#!/bin/bash
+APP="${APP_NAME}"
+SERVER="127.0.0.1:${api_port}"
+LOG="/var/log/remnanode-torrent-blocker.log"
+
+apply() {
+    local i=0
+    while [ \$i -lt 10 ]; do
+        docker exec "\$APP" xray api stats --server="\$SERVER" >/dev/null 2>&1 && break
+        sleep 2; i=\$((i+1))
+    done
+    # Remove stale rule (ignore error if not present)
+    docker exec "\$APP" xray api rmt --server="\$SERVER" torrent-block >/dev/null 2>&1 || true
+    # Add blackhole outbound (ignore error if already exists)
+    docker exec "\$APP" xray api ao --server="\$SERVER" \
+        '{"protocol":"blackhole","settings":{},"tag":"torrent-block"}' >/dev/null 2>&1 || true
+    # Add routing rule: bittorrent → blackhole
+    if docker exec "\$APP" xray api adt --server="\$SERVER" \
+        '{"tag":"torrent-block","protocol":["bittorrent"],"outboundTag":"torrent-block"}' >/dev/null 2>&1; then
+        echo "[\$(date '+%Y-%m-%d %H:%M:%S')] Rules applied OK" >> "\$LOG"
+    else
+        echo "[\$(date '+%Y-%m-%d %H:%M:%S')] Failed to apply rules" >> "\$LOG"
+    fi
+}
+
+# Apply immediately at startup
+apply
+
+# Re-apply after every container restart (panel config push resets dynamic rules)
+docker events --filter "container=\$APP" --filter "event=start" | while read -r _ev; do
+    sleep 3
+    apply
+done
+SCRIPT
+    chmod +x "$TORRENT_APPLY_SCRIPT"
+
+    # Create systemd service
+    cat > "$TORRENT_SERVICE_FILE" << EOF
+[Unit]
+Description=Remnanode Xray Torrent Blocker
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+ExecStart=${TORRENT_APPLY_SCRIPT}
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    systemctl daemon-reload
+    systemctl enable "$TORRENT_SERVICE" >/dev/null 2>&1
+    systemctl start "$TORRENT_SERVICE"
+    sleep 2
+    is_torrent_blocker_active
+}
+
+uninstall_torrent_blocker() {
+    systemctl stop "$TORRENT_SERVICE" 2>/dev/null || true
+    systemctl disable "$TORRENT_SERVICE" 2>/dev/null || true
+    rm -f "$TORRENT_SERVICE_FILE" "$TORRENT_APPLY_SCRIPT"
+    systemctl daemon-reload
+
+    # Remove rules from running xray
+    if docker inspect --format='{{.State.Running}}' "$APP_NAME" 2>/dev/null | grep -q "^true$"; then
+        local port
+        port=$(get_xtls_api_port)
+        docker exec "$APP_NAME" xray api rmt --server="127.0.0.1:${port}" torrent-block >/dev/null 2>&1 || true
+        docker exec "$APP_NAME" xray api ro  --server="127.0.0.1:${port}" torrent-block >/dev/null 2>&1 || true
+    fi
+}
+
+configure_torrent_blocker_integration() {
+    echo
+    colorized_echo cyan "🚫 Xray Torrent Blocker"
+    echo -e "\033[38;5;8m$(printf '─%.0s' $(seq 1 55))\033[0m"
+
+    if is_torrent_blocker_installed; then
+        if is_torrent_blocker_active; then
+            colorized_echo green "✅ Torrent blocker уже активен"
+        else
+            colorized_echo yellow "   Установлен, но не запущен. Запускаем..."
+            systemctl start "$TORRENT_SERVICE" 2>/dev/null
+        fi
+        return 0
+    fi
+
+    if [ "$FORCE_MODE" = "true" ]; then
+        colorized_echo gray "   Пропуск установки torrent blocker (автоматический режим)"
+        return 0
+    fi
+
+    colorized_echo gray "   Блокирует BitTorrent трафик через Xray routing (bittorrent → blackhole)"
+    echo
+    read -p "Установить Xray Torrent Blocker? [y/N]: " -r install_tb
+    if [[ ! $install_tb =~ ^[Yy]$ ]]; then
+        colorized_echo gray "   Пропускаем. Установить позже: remnanode torrent-blocker"
+        return 0
+    fi
+
+    echo
+    colorized_echo cyan "⚙️  Устанавливаем torrent blocker..."
+    if install_torrent_blocker; then
+        colorized_echo green "✅ Xray Torrent Blocker установлен и запущен"
+    else
+        colorized_echo yellow "⚠️  Установлен, но сервис не запустился"
+        colorized_echo gray "   Проверьте: systemctl status $TORRENT_SERVICE"
+    fi
+}
+
+torrent_blocker_status() {
+    echo
+    colorized_echo cyan "🚫 Xray Torrent Blocker Status"
+    echo -e "\033[38;5;8m$(printf '─%.0s' $(seq 1 50))\033[0m"
+    echo
+
+    if ! is_torrent_blocker_installed; then
+        colorized_echo yellow "⚠️  Torrent blocker не установлен"
+        colorized_echo gray "   Установить: remnanode torrent-blocker → пункт 5"
+        return 1
+    fi
+
+    if is_torrent_blocker_active; then
+        printf "   \033[38;5;15m%-18s\033[0m \033[1;32m%s\033[0m\n" "Сервис:" "активен ✅"
+    else
+        printf "   \033[38;5;15m%-18s\033[0m \033[1;31m%s\033[0m\n" "Сервис:" "остановлен ❌"
+    fi
+
+    local port
+    port=$(get_xtls_api_port)
+    printf "   \033[38;5;15m%-18s\033[0m \033[38;5;244m%s\033[0m\n" "XTLS API port:" "$port"
+    echo
+    colorized_echo white "📋 Последние события:"
+    journalctl -u "$TORRENT_SERVICE" --no-pager -n 10 2>/dev/null || \
+        tail -10 /var/log/remnanode-torrent-blocker.log 2>/dev/null || \
+        colorized_echo gray "   Логи недоступны"
+}
+
+torrent_blocker_toggle() {
+    if ! is_torrent_blocker_installed; then
+        colorized_echo yellow "⚠️  Torrent blocker не установлен"
+        return 1
+    fi
+    if is_torrent_blocker_active; then
+        colorized_echo yellow "⏹️  Останавливаем torrent blocker..."
+        systemctl stop "$TORRENT_SERVICE"
+        systemctl disable "$TORRENT_SERVICE" >/dev/null 2>&1
+        colorized_echo green "✅ Torrent blocker остановлен"
+    else
+        colorized_echo cyan "▶️  Запускаем torrent blocker..."
+        systemctl enable "$TORRENT_SERVICE" >/dev/null 2>&1
+        systemctl start "$TORRENT_SERVICE"
+        sleep 2
+        if is_torrent_blocker_active; then
+            colorized_echo green "✅ Torrent blocker запущен"
+        else
+            colorized_echo red "❌ Не удалось запустить. Проверьте: systemctl status $TORRENT_SERVICE"
+        fi
+    fi
+}
+
+torrent_blocker_logs() {
+    echo
+    colorized_echo cyan "📋 Torrent Blocker Logs (последние 50 строк)"
+    echo -e "\033[38;5;8m$(printf '─%.0s' $(seq 1 50))\033[0m"
+    echo
+    journalctl -u "$TORRENT_SERVICE" --no-pager -n 50 2>/dev/null || \
+        tail -50 /var/log/remnanode-torrent-blocker.log 2>/dev/null || \
+        colorized_echo yellow "   Логи недоступны"
+}
+
+torrent_blocker_menu() {
+    while true; do
+        clear
+        echo -e "\033[1;37m🚫 Xray Torrent Blocker\033[0m"
+        echo -e "\033[38;5;8m$(printf '─%.0s' $(seq 1 55))\033[0m"
+        echo
+
+        if is_torrent_blocker_installed; then
+            if is_torrent_blocker_active; then
+                printf "   \033[38;5;15m%-20s\033[0m \033[1;32m%s\033[0m\n" "Torrent Blocker:" "активен ✅"
+            else
+                printf "   \033[38;5;15m%-20s\033[0m \033[1;33m%s\033[0m\n" "Torrent Blocker:" "установлен, остановлен ⚠️"
+            fi
+            local api_port
+            api_port=$(get_xtls_api_port)
+            printf "   \033[38;5;15m%-20s\033[0m \033[38;5;244m127.0.0.1:%s\033[0m\n" "XTLS API:" "$api_port"
+        else
+            printf "   \033[38;5;15m%-20s\033[0m \033[38;5;244m%s\033[0m\n" "Torrent Blocker:" "не установлен"
+        fi
+
+        echo
+        echo -e "\033[38;5;8m$(printf '─%.0s' $(seq 1 55))\033[0m"
+
+        if is_torrent_blocker_installed; then
+            echo -e "   \033[38;5;15m1)\033[0m 📊 Статус"
+            echo -e "   \033[38;5;15m2)\033[0m 📋 Логи"
+            if is_torrent_blocker_active; then
+                echo -e "   \033[38;5;15m3)\033[0m ⏹️  Остановить"
+            else
+                echo -e "   \033[38;5;15m3)\033[0m ▶️  Запустить"
+            fi
+            echo -e "   \033[38;5;15m4)\033[0m 🗑️  Удалить"
+        else
+            echo -e "   \033[38;5;244m   1-4) Недоступно (не установлен)\033[0m"
+            echo -e "   \033[38;5;15m5)\033[0m 📦 Установить"
+        fi
+
+        echo -e "\033[38;5;8m$(printf '─%.0s' $(seq 1 55))\033[0m"
+        echo -e "\033[38;5;15m   0)\033[0m 🔙 Назад"
+        echo
+        read -p "$(echo -e "\033[1;37mВыберите пункт [0-5]:\033[0m ")" tb_choice
+
+        case "$tb_choice" in
+            1)
+                if is_torrent_blocker_installed; then torrent_blocker_status
+                else colorized_echo yellow "⚠️  Torrent blocker не установлен"; fi
+                read -p "Press Enter to continue..."
+                ;;
+            2)
+                if is_torrent_blocker_installed; then torrent_blocker_logs
+                else colorized_echo yellow "⚠️  Torrent blocker не установлен"; fi
+                read -p "Press Enter to continue..."
+                ;;
+            3)
+                if is_torrent_blocker_installed; then torrent_blocker_toggle
+                else colorized_echo yellow "⚠️  Torrent blocker не установлен"; fi
+                read -p "Press Enter to continue..."
+                ;;
+            4)
+                if is_torrent_blocker_installed; then
+                    read -p "Удалить torrent blocker? [y/N]: " -r confirm_del
+                    if [[ $confirm_del =~ ^[Yy]$ ]]; then
+                        uninstall_torrent_blocker
+                        colorized_echo green "✅ Torrent blocker удалён"
+                    fi
+                else
+                    colorized_echo yellow "⚠️  Torrent blocker не установлен"
+                fi
+                read -p "Press Enter to continue..."
+                ;;
+            5)
+                if ! is_torrent_blocker_installed; then configure_torrent_blocker_integration
+                else colorized_echo yellow "⚠️  Torrent blocker уже установлен"; fi
+                read -p "Press Enter to continue..."
+                ;;
+            0) break ;;
+            *)
+                echo -e "\033[1;31m❌ Неверный пункт!\033[0m"
+                sleep 1
+                ;;
+        esac
+    done
+}
+
 install_remnanode() {
 
     if ! check_system_requirements; then
@@ -1778,6 +2066,9 @@ install_command() {
 
     # Offer fail2ban installation
     configure_fail2ban_integration
+
+    # Offer torrent blocker installation
+    configure_torrent_blocker_integration
 
     up_remnanode
     follow_remnanode_logs
@@ -4393,6 +4684,7 @@ usage() {
     printf "   \033[38;5;178m%-18s\033[0m %s\n" "enable-socket" "🔗 Enable selfsteal socket access"
     printf "   \033[38;5;178m%-18s\033[0m %s\n" "auto-restart" "⏰ Configure scheduled auto-restart"
     printf "   \033[38;5;178m%-18s\033[0m %s\n" "fail2ban" "🛡️  Fail2ban manager (ban/unban/status)"
+    printf "   \033[38;5;178m%-18s\033[0m %s\n" "torrent-blocker" "🚫 Xray Torrent Blocker (enable/disable)"
     echo
 
     echo -e "\033[1;37m📋 Information:\033[0m"
@@ -4664,6 +4956,7 @@ main_menu() {
         echo -e "   \033[38;5;15m16)\033[0m 🗂️  Setup log rotation"
         echo -e "   \033[38;5;15m17)\033[0m ⏰ Auto-restart schedule"
         echo -e "   \033[38;5;15m18)\033[0m 🛡️  Fail2ban manager"
+        echo -e "   \033[38;5;15m19)\033[0m 🚫 Xray Torrent Blocker"
         echo
         echo -e "\033[38;5;8m$(printf '─%.0s' $(seq 1 55))\033[0m"
         echo -e "\033[38;5;15m   0)\033[0m 🚪 Exit to terminal"
@@ -4688,7 +4981,7 @@ main_menu() {
         
         echo -e "\033[38;5;8mRemnaNode CLI v$SCRIPT_VERSION by DigneZzZ • gig.ovh\033[0m"
         echo
-        read -p "$(echo -e "\033[1;37mSelect option [0-18]:\033[0m ")" choice
+        read -p "$(echo -e "\033[1;37mSelect option [0-19]:\033[0m ")" choice
 
         case "$choice" in
             1) install_command; read -p "Press Enter to continue..." ;;
@@ -4709,6 +5002,7 @@ main_menu() {
             16) setup_log_rotation; read -p "Press Enter to continue..." ;;
             17) autorestart_menu ;;
             18) fail2ban_menu ;;
+            19) torrent_blocker_menu ;;
             0) clear; exit 0 ;;
             *) 
                 echo -e "\033[1;31m❌ Invalid option!\033[0m"
@@ -4741,6 +5035,7 @@ case "${COMMAND:-menu}" in
     enable-socket) enable_socket_command ;;
     auto-restart) autorestart_command ;;
     fail2ban) fail2ban_menu ;;
+    torrent-blocker) torrent_blocker_menu ;;
     help|--help|-h) usage ;;
     version|--version|-v) show_version ;;
     menu) main_menu ;;
