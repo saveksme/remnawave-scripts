@@ -934,6 +934,137 @@ EOF
     fi
 }
 
+print_xray_profile_config() {
+    local domain port private_key tag_name inbound_port xver_val
+    local has_selfsteal=false
+
+    if check_caddy_selfsteal 2>/dev/null; then
+        has_selfsteal=true
+        domain=$(get_caddy_domain)
+        port=$(get_caddy_https_port)
+        xver_val=0
+        inbound_port=443
+        tag_name="VLESS_TCP_${domain}_REALITY"
+    else
+        domain="<your-domain>"
+        port="<selfsteal-port>"
+        xver_val=0
+        inbound_port=443
+        tag_name="VLESS_TCP_REALITY"
+    fi
+
+    # Generate fresh Reality private key from running container
+    if docker inspect --format='{{.State.Running}}' "$APP_NAME" 2>/dev/null | grep -q "^true$"; then
+        private_key=$(docker exec "$APP_NAME" xray x25519 2>/dev/null | grep "Private key:" | awk '{print $NF}')
+    fi
+    private_key="${private_key:-<generate: docker exec $APP_NAME xray x25519>}"
+
+    echo
+    echo -e "\033[38;5;8m$(printf '─%.0s' $(seq 1 70))\033[0m"
+    echo -e "\033[1;37m📋 Xray Node Profile Config\033[0m"
+    echo -e "\033[38;5;8m$(printf '─%.0s' $(seq 1 70))\033[0m"
+    echo
+
+    if $has_selfsteal; then
+        colorized_echo green "✅ Selfsteal обнаружен — значения подставлены автоматически"
+    else
+        colorized_echo yellow "⚠️  Selfsteal не установлен — показан шаблон с placeholder'ами"
+    fi
+    echo
+    colorized_echo cyan "📋 Вставьте этот конфиг в профиль ноды Remnawave:"
+    echo
+
+    cat << EOF
+{
+  "log": {
+    "error": "$LOG_DIR/error.log",
+    "access": "$LOG_DIR/access.log",
+    "loglevel": "error"
+  },
+  "inbounds": [
+    {
+      "tag": "${tag_name}",
+      "port": ${inbound_port},
+      "listen": "0.0.0.0",
+      "protocol": "vless",
+      "settings": {
+        "clients": [],
+        "decryption": "none"
+      },
+      "sniffing": {
+        "enabled": true,
+        "destOverride": [
+          "http",
+          "tls",
+          "quic"
+        ]
+      },
+      "streamSettings": {
+        "network": "raw",
+        "security": "reality",
+        "realitySettings": {
+          "show": false,
+          "xver": ${xver_val},
+          "target": "127.0.0.1:${port}",
+          "shortIds": [
+            ""
+          ],
+          "privateKey": "${private_key}",
+          "serverNames": [
+            "${domain}"
+          ]
+        }
+      }
+    }
+  ],
+  "outbounds": [
+    {
+      "tag": "DIRECT",
+      "protocol": "freedom"
+    },
+    {
+      "tag": "BLOCK",
+      "protocol": "blackhole"
+    },
+    {
+      "tag": "TORRENT",
+      "protocol": "blackhole"
+    }
+  ],
+  "routing": {
+    "rules": [
+      {
+        "ip": [
+          "geoip:private"
+        ],
+        "type": "field",
+        "outboundTag": "BLOCK"
+      },
+      {
+        "type": "field",
+        "domain": [
+          "geosite:private"
+        ],
+        "outboundTag": "BLOCK"
+      },
+      {
+        "type": "field",
+        "protocol": [
+          "bittorrent"
+        ],
+        "outboundTag": "TORRENT"
+      }
+    ]
+  }
+}
+EOF
+
+    echo
+    echo -e "\033[38;5;8m$(printf '─%.0s' $(seq 1 70))\033[0m"
+    colorized_echo gray "   💾 Показать снова: remnanode profile-config"
+    echo
+}
+
 configure_fail2ban_integration() {
     echo
     colorized_echo cyan "🛡️  Fail2ban — защита сервера от брутфорса"
@@ -2435,6 +2566,8 @@ install_command() {
     echo -e "\033[38;5;8m💡 For all commands: \033[38;5;15msudo $APP_NAME\033[0m"
     echo -e "\033[38;5;8m📚 Project: \033[38;5;250mhttps://gig.ovh\033[0m"
     echo -e "\033[38;5;8m$(printf '─%.0s' $(seq 1 70))\033[0m"
+
+    print_xray_profile_config
 }
 
 uninstall_command() {
@@ -4998,6 +5131,7 @@ usage() {
     printf "   \033[38;5;178m%-18s\033[0m %s\n" "fail2ban" "🛡️  Fail2ban manager (ban/unban/status)"
     printf "   \033[38;5;178m%-18s\033[0m %s\n" "torrent-blocker" "🚫 Xray Torrent Blocker (enable/disable)"
     printf "   \033[38;5;178m%-18s\033[0m %s\n" "net-opt" "🌐 Network Optimizations (BBR+CAKE / IPv6)"
+    printf "   \033[38;5;178m%-18s\033[0m %s\n" "profile-config" "📋 Show Xray node profile config"
     echo
 
     echo -e "\033[1;37m📋 Information:\033[0m"
@@ -5271,6 +5405,7 @@ main_menu() {
         echo -e "   \033[38;5;15m18)\033[0m 🛡️  Fail2ban manager"
         echo -e "   \033[38;5;15m19)\033[0m 🚫 Xray Torrent Blocker"
         echo -e "   \033[38;5;15m20)\033[0m 🌐 Network Optimizations (BBR / IPv6)"
+        echo -e "   \033[38;5;15m21)\033[0m 📋 Show Xray Profile Config"
         echo
         echo -e "\033[38;5;8m$(printf '─%.0s' $(seq 1 55))\033[0m"
         echo -e "\033[38;5;15m   0)\033[0m 🚪 Exit to terminal"
@@ -5295,7 +5430,7 @@ main_menu() {
         
         echo -e "\033[38;5;8mRemnaNode CLI v$SCRIPT_VERSION by DigneZzZ • gig.ovh\033[0m"
         echo
-        read -p "$(echo -e "\033[1;37mSelect option [0-20]:\033[0m ")" choice
+        read -p "$(echo -e "\033[1;37mSelect option [0-21]:\033[0m ")" choice
 
         case "$choice" in
             1) install_command; read -p "Press Enter to continue..." ;;
@@ -5318,6 +5453,7 @@ main_menu() {
             18) fail2ban_menu ;;
             19) torrent_blocker_menu ;;
             20) net_opt_menu ;;
+            21) print_xray_profile_config; read -p "Press Enter to continue..." ;;
             0) clear; exit 0 ;;
             *) 
                 echo -e "\033[1;31m❌ Invalid option!\033[0m"
@@ -5352,6 +5488,7 @@ case "${COMMAND:-menu}" in
     fail2ban) fail2ban_menu ;;
     torrent-blocker) torrent_blocker_menu ;;
     net-opt) net_opt_menu ;;
+    profile-config) print_xray_profile_config ;;
     help|--help|-h) usage ;;
     version|--version|-v) show_version ;;
     menu) main_menu ;;
