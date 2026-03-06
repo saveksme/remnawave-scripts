@@ -745,62 +745,20 @@ EOL
 # ============================================
 
 # Socket path for nginx-selfsteal
-SELFSTEAL_SOCKET="/dev/shm/nginx.sock"
+CADDY_SELFSTEAL_CONTAINER="caddy-selfsteal"
 
-# Check if selfsteal socket exists
-check_selfsteal_socket() {
-    if [ -S "$SELFSTEAL_SOCKET" ]; then
-        return 0
-    fi
-    return 1
+# Check if caddy-selfsteal Docker container is running
+check_caddy_selfsteal() {
+    docker inspect --format='{{.State.Running}}' "$CADDY_SELFSTEAL_CONTAINER" 2>/dev/null | grep -q "^true$"
 }
 
-# Enable /dev/shm volume in docker-compose.yml
-enable_shm_volume() {
-    local compose_file="$1"
-    
-    if [ ! -f "$compose_file" ]; then
-        return 1
-    fi
-    
-    # Check if already uncommented
-    if grep -qE "^[[:space:]]*-[[:space:]]*/dev/shm:/dev/shm" "$compose_file"; then
-        colorized_echo green "✅ /dev/shm volume is already enabled"
-        return 0
-    fi
-    
-    # Check if commented and uncomment
-    if grep -qE "^[[:space:]]*#.*-[[:space:]]*/dev/shm:/dev/shm" "$compose_file"; then
-        colorized_echo blue "Enabling /dev/shm volume for selfsteal socket access..."
-        
-        # First, check if 'volumes:' is also commented and uncomment it
-        if grep -qE "^[[:space:]]*#[[:space:]]*volumes:" "$compose_file"; then
-            sed -i 's|^[[:space:]]*#[[:space:]]*\(volumes:\)|    \1|' "$compose_file"
-        fi
-        
-        # Then uncomment the /dev/shm line
-        sed -i 's|^[[:space:]]*#[[:space:]]*\(-[[:space:]]*/dev/shm:/dev/shm.*\)|      \1|' "$compose_file"
-        
-        if docker compose -f "$compose_file" config >/dev/null 2>&1; then
-            colorized_echo green "✅ /dev/shm volume enabled successfully"
-            return 0
-        else
-            colorized_echo red "Failed to validate docker-compose.yml after modification"
-            return 1
-        fi
-    fi
-    
-    colorized_echo yellow "⚠️  /dev/shm volume line not found in docker-compose.yml"
-    return 1
-}
-
-# Install selfsteal (nginx-based) via DigneZzZ scripts
+# Install selfsteal (Caddy-based) via DigneZzZ scripts
 install_selfsteal() {
     echo
-    colorized_echo cyan "🚀 Installing Selfsteal (nginx)..."
+    colorized_echo cyan "🚀 Installing Selfsteal (Caddy)..."
     echo
-    if bash <(curl -Ls https://github.com/DigneZzZ/remnawave-scripts/raw/main/selfsteal.sh) @ install --nginx; then
-        colorized_echo green "✅ Selfsteal installed successfully"
+    if bash <(curl -Ls https://github.com/DigneZzZ/remnawave-scripts/raw/main/selfsteal.sh) @ install --caddy; then
+        colorized_echo green "✅ Selfsteal (Caddy) installed successfully"
         return 0
     else
         colorized_echo red "❌ Selfsteal installation failed"
@@ -808,109 +766,80 @@ install_selfsteal() {
     fi
 }
 
-# Configure selfsteal socket access after installation
+# Print Xray Reality config hint for Caddy (TCP-based)
+print_caddy_reality_hint() {
+    colorized_echo cyan "📋 Xray Reality Configuration (Caddy / TCP):"
+    colorized_echo white "   \"dest\": \"127.0.0.1:443\","
+    colorized_echo white "   \"serverNames\": [\"<your-domain>\"]"
+    colorized_echo gray "   (Caddy listens on 127.0.0.1:443 — no unix socket needed)"
+}
+
+# Configure selfsteal integration after installation
 configure_selfsteal_integration() {
     echo
-    colorized_echo cyan "🔍 Checking for Selfsteal (nginx/caddy) installation..."
+    colorized_echo cyan "🔍 Checking for Selfsteal (Caddy) installation..."
 
-    if check_selfsteal_socket; then
-        colorized_echo green "✅ Detected selfsteal socket at $SELFSTEAL_SOCKET"
-        colorized_echo blue "   Enabling socket access for remnanode container..."
-
-        if enable_shm_volume "$COMPOSE_FILE"; then
-            colorized_echo green "✅ Remnanode configured for selfsteal socket access"
-            echo
-            colorized_echo cyan "📋 Xray Reality Configuration:"
-            colorized_echo white "   \"target\": \"$SELFSTEAL_SOCKET\","
-            colorized_echo white "   \"xver\": 1"
-        fi
+    if check_caddy_selfsteal; then
+        colorized_echo green "✅ Caddy selfsteal container is running"
+        echo
+        print_caddy_reality_hint
     else
-        colorized_echo gray "   No selfsteal socket detected"
+        colorized_echo gray "   Caddy selfsteal not detected"
         echo
         if [ "$FORCE_MODE" != "true" ]; then
             colorized_echo cyan "💡 Selfsteal позволяет использовать ваш SSL-сертификат как прикрытие для Xray Reality."
-            read -p "Установить Selfsteal (nginx) прямо сейчас? [y/N]: " -r install_ss
+            read -p "Установить Selfsteal (Caddy) прямо сейчас? [y/N]: " -r install_ss
             if [[ $install_ss =~ ^[Yy]$ ]]; then
                 if install_selfsteal; then
                     sleep 2
-                    if check_selfsteal_socket; then
-                        colorized_echo blue "   Enabling socket access for remnanode container..."
-                        if enable_shm_volume "$COMPOSE_FILE"; then
-                            colorized_echo green "✅ Remnanode configured for selfsteal socket access"
-                            echo
-                            colorized_echo cyan "📋 Xray Reality Configuration:"
-                            colorized_echo white "   \"target\": \"$SELFSTEAL_SOCKET\","
-                            colorized_echo white "   \"xver\": 1"
-                        fi
+                    if check_caddy_selfsteal; then
+                        colorized_echo green "✅ Caddy selfsteal запущен"
+                        echo
+                        print_caddy_reality_hint
                     else
-                        colorized_echo yellow "⚠️  Сокет selfsteal ещё не доступен. После запуска selfsteal выполните:"
-                        colorized_echo white "   remnanode enable-socket"
+                        colorized_echo yellow "⚠️  Контейнер caddy-selfsteal ещё не запущен. Проверьте статус:"
+                        colorized_echo white "   docker ps | grep caddy-selfsteal"
                     fi
                 fi
             else
                 colorized_echo gray "   Пропускаем установку selfsteal."
-                colorized_echo gray "   Для установки позже: bash <(curl -Ls https://github.com/DigneZzZ/remnawave-scripts/raw/main/selfsteal.sh) @ install --nginx"
-                colorized_echo gray "   Затем активируйте сокет: remnanode enable-socket"
+                colorized_echo gray "   Для установки позже: bash <(curl -Ls https://github.com/DigneZzZ/remnawave-scripts/raw/main/selfsteal.sh) @ install --caddy"
             fi
         else
-            colorized_echo gray "   If you install selfsteal later, run:"
-            colorized_echo white "   remnanode enable-socket"
+            colorized_echo gray "   To install Caddy selfsteal later:"
+            colorized_echo white "   bash <(curl -Ls https://github.com/DigneZzZ/remnawave-scripts/raw/main/selfsteal.sh) @ install --caddy"
         fi
     fi
 }
 
-# Command to enable socket access manually
+# Command to check Caddy selfsteal status and print Reality config
 enable_socket_command() {
     echo
-    colorized_echo cyan "🔌 Selfsteal Socket Configuration"
+    colorized_echo cyan "🔌 Selfsteal (Caddy) Status"
     echo -e "\033[38;5;8m$(printf '─%.0s' $(seq 1 50))\033[0m"
-    
-    if [ ! -f "$COMPOSE_FILE" ]; then
-        colorized_echo red "❌ docker-compose.yml not found at $COMPOSE_FILE"
-        colorized_echo gray "   Please install remnanode first: remnanode install"
-        exit 1
-    fi
-    
-    # Check if socket exists
-    if check_selfsteal_socket; then
-        colorized_echo green "✅ Selfsteal socket detected at $SELFSTEAL_SOCKET"
+
+    if check_caddy_selfsteal; then
+        colorized_echo green "✅ Caddy selfsteal container is running"
+        echo
+        print_caddy_reality_hint
     else
-        colorized_echo yellow "⚠️  Selfsteal socket not found at $SELFSTEAL_SOCKET"
-        colorized_echo gray "   Make sure selfsteal with --nginx is installed and running"
+        colorized_echo yellow "⚠️  Caddy selfsteal container is not running"
+        colorized_echo gray "   Install it with:"
+        colorized_echo white "   bash <(curl -Ls https://github.com/DigneZzZ/remnawave-scripts/raw/main/selfsteal.sh) @ install --caddy"
         echo
-        read -p "Continue anyway? [y/N]: " -r confirm
-        if [[ ! $confirm =~ ^[Yy]$ ]]; then
-            colorized_echo gray "Cancelled"
-            exit 0
-        fi
-    fi
-    
-    echo
-    if enable_shm_volume "$COMPOSE_FILE"; then
-        echo
-        colorized_echo blue "🔄 Restarting remnanode container..."
-        
-        cd "$APP_DIR"
-        if docker compose down && docker compose up -d; then
-            colorized_echo green "✅ Remnanode restarted with socket access"
-            
-            # Verify
-            sleep 2
-            if docker exec "$APP_NAME" ls -la /dev/shm/nginx.sock >/dev/null 2>&1; then
-                colorized_echo green "✅ Verified: Container can access $SELFSTEAL_SOCKET"
-            else
-                colorized_echo yellow "⚠️  Socket not accessible yet (selfsteal may not be running)"
+        read -p "Установить Caddy selfsteal сейчас? [y/N]: " -r confirm
+        if [[ $confirm =~ ^[Yy]$ ]]; then
+            if install_selfsteal; then
+                sleep 2
+                if check_caddy_selfsteal; then
+                    colorized_echo green "✅ Caddy selfsteal запущен"
+                    echo
+                    print_caddy_reality_hint
+                else
+                    colorized_echo yellow "⚠️  Контейнер ещё не запущен, проверьте: docker ps | grep caddy"
+                fi
             fi
-        else
-            colorized_echo red "❌ Failed to restart remnanode"
         fi
-        
-        echo
-        colorized_echo cyan "📋 Xray Reality Configuration:"
-        colorized_echo white "   \"target\": \"$SELFSTEAL_SOCKET\","
-        colorized_echo white "   \"xver\": 1"
-    else
-        colorized_echo red "❌ Failed to enable socket access"
     fi
 }
 
@@ -1155,14 +1084,12 @@ EOL
 
         cat >> "$COMPOSE_FILE" <<EOL
       - $LOG_DIR:$LOG_DIR
-      # - /dev/shm:/dev/shm  # Uncomment for selfsteal socket access
 EOL
     else
         # Xray not installed: log dir uncommented, xray mounts commented
         cat >> "$COMPOSE_FILE" <<EOL
     volumes:
       - $LOG_DIR:$LOG_DIR
-      # - /dev/shm:/dev/shm  # Uncomment for selfsteal socket access
       # Uncomment below to use a custom Xray binary:
       #   - $XRAY_FILE:/usr/local/bin/xray
       #   - $GEOIP_FILE:/usr/local/share/xray/geoip.dat
