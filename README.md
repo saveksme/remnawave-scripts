@@ -1,480 +1,258 @@
-# Remnawave Scripts
+# Remnawave Scripts — Fork by saveksme
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![Shell](https://img.shields.io/badge/language-Bash-blue.svg)](#)
-[![Version](https://img.shields.io/badge/version-5.8.0-blue.svg)](#)
-[![Localization](https://img.shields.io/badge/🌐_Languages-EN_|_RU-green.svg)](#)
+[![Fork of](https://img.shields.io/badge/fork%20of-DigneZzZ%2Fremnawave--scripts-orange.svg)](https://github.com/DigneZzZ/remnawave-scripts)
 
-![remnawave-script](remnawave-script.webp)
-
-> **TL;DR:** One-liner scripts to deploy and manage **Remnawave Panel**, **RemnaNode**, and **Reality traffic masking** via Docker. Includes backup/restore, Telegram notifications, Caddy reverse proxy, and bilingual CLI (EN/RU).
-
-**[📖 Readme на русском](/README_RU.md)** · **[💬 Support](https://gig.ovh/t/remnawave-managment-scripts-by-dignezzz/116)**
+> Форк оригинального скрипта [DigneZzZ/remnawave-scripts](https://github.com/DigneZzZ/remnawave-scripts) с расширенными возможностями для `remnanode.sh`: автонастройка безопасности, управление торрент-блокировкой, сетевые оптимизации и отображение конфига профиля Xray после установки.
 
 ---
 
-## 🚀 Quick Start
+## ⚡ Установка
 
 ```bash
-# Remnawave Panel
-bash <(curl -Ls https://github.com/DigneZzZ/remnawave-scripts/raw/main/remnawave.sh) @ install
+# RemnaNode (форк)
+bash <(curl -Ls https://github.com/saveksme/remnawave-scripts/raw/main/remnanode.sh) @ install
 
-# RemnaNode
-bash <(curl -Ls https://github.com/DigneZzZ/remnawave-scripts/raw/main/remnanode.sh) @ install
-
-# Caddy Selfsteal (Reality masking)
-bash <(curl -Ls https://github.com/DigneZzZ/remnawave-scripts/raw/main/selfsteal.sh) @ install
+# Caddy Selfsteal (оригинал, без изменений)
+bash <(curl -Ls https://github.com/saveksme/remnawave-scripts/raw/main/selfsteal.sh) @ install --caddy
 ```
 
-After installation, manage services with: `remnawave`, `remnanode`, or `selfsteal` commands.
+После установки управление через команду `remnanode`.
 
 ---
 
-## 📦 What's Included
+## 🆕 Отличия от оригинала
 
-| Script | Purpose | Install Command |
-|--------|---------|----------------|
-| **remnawave.sh** | Panel installer & manager | `remnawave <command>` |
-| **remnanode.sh** | Node installer & manager | `remnanode <command>` |
-| **selfsteal.sh** | Reality traffic masking | `selfsteal <command>` |
-| **wtm.sh** | WARP & Tor Manager | `wtm <command>` |
-| **netbird.sh** | NetBird VPN installer | `netbird.sh <command>` |
+Все изменения касаются только **`remnanode.sh`**. Остальные скрипты (`remnawave.sh`, `selfsteal.sh`, `wtm.sh`, `netbird.sh`) не изменялись.
 
-**Key features across all scripts:** auto-updates, interactive menus, bilingual interface (EN/RU), Docker Compose v2, idempotent operations.
+### 1. 🔍 Автоопределение домена Selfsteal
+
+**Оригинал:** в подсказке Xray Reality конфига всегда показывался placeholder `"serverNames": ["<your-domain>"]`.
+
+**Форк:** скрипт читает реальный домен из `/opt/caddy/.env` (`SELF_STEAL_DOMAIN=`) и подставляет его автоматически.
+
+```
+"serverNames": ["example.com"]   ← реальный домен вместо плейсхолдера
+```
 
 ---
 
-## 🚀 Remnawave Panel
+### 2. 🛡️ Fail2ban (пункт 18)
 
-Full installer and manager for [Remnawave Panel](https://github.com/remnawave/) with backup/restore, Caddy proxy, Telegram integration, and subscription page management.
+Предложение установить fail2ban в процессе установки ноды. Настраиваемые параметры:
 
-### Installation
+| Параметр | По умолчанию | Описание |
+|----------|-------------|----------|
+| `bantime` | 3600 сек | Время бана |
+| `findtime` | 600 сек | Окно поиска попыток |
+| `maxretry` | 5 | Попыток до бана |
 
-```bash
-# Standard install
-bash <(curl -Ls https://github.com/DigneZzZ/remnawave-scripts/raw/main/remnawave.sh) @ install
-
-# With options
-bash <(curl -Ls https://github.com/DigneZzZ/remnawave-scripts/raw/main/remnawave.sh) @ install --name panel-prod --dev
-```
-
-| Flag | Description |
-|------|-------------|
-| `--name NAME` | Custom installation directory name |
-| `--dev` | Install development version |
-
-### Commands
-
-<details>
-<summary><b>📋 All Panel Commands</b></summary>
-
-| Command | Description |
-|---------|-------------|
-| `install` | Install Remnawave Panel |
-| `install-script` | Install management script only |
-| `update` | Update script and containers |
-| `uninstall` | Remove panel completely |
-| `up` / `down` / `restart` | Service lifecycle |
-| `status` | Show service status |
-| `logs` | View container logs (`--follow`) |
-| `edit` | Edit docker-compose.yml |
-| `edit-env` | Edit .env file |
-| `console` | Access panel CLI console |
-| `backup` | Create backup (`--data-only`, `--no-compress`) |
-| `restore` | Restore from backup (`--file FILE`, `--database-only`) |
-| `schedule` | Manage scheduled backups |
-| `subpage` | Subscription page settings |
-| `subpage-token` | Configure API token |
-| `subpage-restart` | Restart subscription-page |
-| `install-subpage` | Install subscription-page only |
-| `install-subpage-standalone` | Install subpage on separate server (`--with-caddy`) |
-| `caddy` / `caddy up` / `caddy down` | Caddy management |
-| `caddy logs` / `caddy edit` | Caddy logs & config |
-| `caddy restart` / `caddy uninstall` | Caddy lifecycle |
-| `caddy reset-user` | Reset Caddy admin password |
-
-</details>
-
-### Highlights
-
-- **Auto-generation** of `.env`, secrets, ports, `docker-compose.yml`
-- **Admin auto-creation** — credentials saved to `admin-credentials.txt`
-- **Caddy Reverse Proxy** — Simple mode (auto SSL) or Secure mode (auth portal + MFA)
-- **Backup system** — full/DB-only backups, cron scheduling, Telegram delivery, version-aware restore → see [💾 Backup, Restore & Migration](#-backup-restore--migration)
-- **Variable migration** — deprecated env vars auto-removed on `update` (v2.2.0+)
-
-<details>
-<summary><b>🌐 Standalone Subscription-Page</b></summary>
-
-Install subscription-page on a **separate server** connecting to your main panel via API:
+Управление после установки:
 
 ```bash
-bash <(curl -Ls https://github.com/DigneZzZ/remnawave-scripts/raw/main/remnawave.sh) @ install-subpage-standalone --with-caddy
+remnanode fail2ban        # или пункт 18 в меню
 ```
 
-The installer asks for panel URL, API token, and subscription domain, then generates a minimal docker-compose without DB dependencies.
-
-</details>
-
-<details>
-<summary><b>📱 Telegram Integration</b></summary>
-
-Configure in `.env`:
-
-```bash
-IS_TELEGRAM_NOTIFICATIONS_ENABLED=true
-TELEGRAM_BOT_TOKEN=your_bot_token
-TELEGRAM_NOTIFY_USERS_CHAT_ID=your_chat_id
-TELEGRAM_NOTIFY_NODES_CHAT_ID=your_chat_id
-```
-
-Supports backup notifications, large file delivery (>50MB chunked), and thread-based group chats.
-
-</details>
-
-<details>
-<summary><b>🔄 Variable Migration (v2.2.0+)</b></summary>
-
-On `remnawave update`, deprecated env vars (OAuth, Branding) are auto-removed from `.env` with backup. Configure them in Panel UI instead:
-
-- **Settings → Authentication → Login Methods** (OAuth)
-- **Settings → Branding** (Logo, title)
-
-</details>
-
-<details>
-<summary><b>📂 File Structure</b></summary>
-
-```text
-/opt/remnawave/
-├── .env, .env.subscription
-├── docker-compose.yml
-├── app-config.json, backup-config.json
-├── backup-scheduler.sh
-├── backups/              # Backup storage
-└── logs/                 # Operation logs
-
-/opt/caddy-remnawave/     # Caddy (if installed)
-├── docker-compose.yml, Caddyfile, .env
-└── data/                 # SSL certs
-
-/usr/local/bin/remnawave  # CLI command
-```
-
-</details>
+Возможности меню: статус, список забаненных IP, разбан, логи, включить/выключить, настройка параметров.
 
 ---
 
-## 💾 Backup, Restore & Migration
+### 3. 🚫 Xray Torrent Blocker (пункт 19)
 
-Built-in backup system in `remnawave.sh` with version-aware restore, cron scheduling, and Telegram delivery.
-
-### Backup
+Установка [tblocker by kutovoy](https://github.com/kutovoy) из репозитория `repo.remna.dev`. Блокирует торрент-трафик через анализ логов Xray по тегу.
 
 ```bash
-remnawave backup                    # Full system backup (compressed .tar.gz)
-remnawave backup --data-only        # Database only (.sql.gz)
-remnawave backup --no-compress      # Uncompressed backup
+remnanode torrent-blocker   # или пункт 19 в меню
 ```
 
-### Scheduled Backups
+Настраиваемые параметры при установке:
 
-```bash
-remnawave schedule                  # Interactive cron schedule setup
-```
+| Параметр | По умолчанию | Описание |
+|----------|-------------|----------|
+| `BlockDuration` | 10 мин | Время блокировки IP |
+| `TorrentTag` | `TORRENT` | Тег Xray inbound для отслеживания |
+| `BlockMode` | `iptables` | Метод блокировки |
 
-Options: daily/weekly/monthly intervals, retention policies, compression settings, Telegram delivery.
+**Управление забаненными IP** (уникальная функция форка):
 
-### Restore
+| Пункт | Действие |
+|-------|----------|
+| 5 | 📋 Список всех заблокированных IP с числом пакетов |
+| 6 | 🔒 Вручную заблокировать IP |
+| 7 | 🔓 Разблокировать IP — по номеру из списка или по IP |
 
-```bash
-remnawave restore --file backup.tar.gz                  # Full restore (auto safety backup)
-remnawave restore --database-only --file database.sql.gz # Database only
-```
-
-**Version checking:** major/minor versions must match for restore; patch differences show warnings but are allowed.
-
-### Migration to Another Server
-
-1. Create a backup on the **source** server:
-   ```bash
-   remnawave backup
-   ```
-2. Transfer the backup file to the **target** server (e.g., via `scp`)
-3. On the **target** server, install and restore:
-   ```bash
-   bash <(curl -Ls https://github.com/DigneZzZ/remnawave-scripts/raw/main/remnawave.sh) @ install --name remnawave
-   remnawave restore --file backup.tar.gz
-   ```
-
-<details>
-<summary><b>🛠 Manual Restore (if automatic fails)</b></summary>
-
-```bash
-# Option A: New installation
-sudo bash remnawave.sh @ install --name remnawave
-sudo remnawave down
-tar -xzf backup.tar.gz
-cat backup_folder/database.sql | docker exec -i -e PGPASSWORD="password" remnawave-db psql -U postgres -d postgres
-sudo remnawave up
-
-# Option B: Existing installation
-sudo remnawave down
-cat database.sql | docker exec -i -e PGPASSWORD="password" remnawave-db psql -U postgres -d postgres
-sudo remnawave up
-```
-
-</details>
+Работает напрямую с iptables-цепочкой `TBLOCKER`, которую создаёт tblocker. Поддерживается также режим `nftables`.
 
 ---
 
-## 🛰 RemnaNode
-
-Installer and manager for **RemnaNode** proxy nodes with Xray-core integration. Multi-architecture support (x86_64, ARM64, ARM32, MIPS).
-
-### Installation
+### 4. 🌐 Сетевые оптимизации — BBR + CAKE и IPv6 (пункт 20)
 
 ```bash
-# Interactive
-bash <(curl -Ls https://github.com/DigneZzZ/remnawave-scripts/raw/main/remnanode.sh) @ install
-
-# Non-interactive (force mode)
-bash <(curl -Ls https://github.com/DigneZzZ/remnawave-scripts/raw/main/remnanode.sh) @ install \
-    --force --secret-key="KEY" --port=3001 --xray
+remnanode net-opt   # или пункт 20 в меню
 ```
 
-| Flag | Description | Default |
-|------|-------------|---------|
-| `--force`, `-f` | Skip all confirmations | — |
-| `--secret-key=KEY` | SECRET_KEY from Panel (required in force mode) | — |
-| `--port=PORT` | NODE_PORT | `3000` |
-| `--xtls-port=PORT` | XTLS_API_PORT | `61000` |
-| `--xray` / `--no-xray` | Install Xray-core | not installed in force mode |
-| `--name NAME` | Directory name | `remnanode` |
-| `--dev` | Development image | — |
+**BBR + CAKE:**
+- Включает TCP-алгоритм BBR и qdisc CAKE через `/etc/sysctl.d/99-bbr-cake.conf`
+- Применяется немедленно, сохраняется после перезагрузки
 
-### Commands
+**Отключение IPv6:**
+- Записывает правила в `/etc/sysctl.d/99-disable-ipv6.conf`
+- Применяется немедленно через `sysctl -p`
+- Обратимо: включить IPv6 обратно можно из того же меню
 
-<details>
-<summary><b>📋 All Node Commands</b></summary>
+---
 
-| Command | Description |
-|---------|-------------|
-| `install` | Install RemnaNode |
-| `install-script` | Install script only |
-| `update` | Update script and container |
-| `uninstall` | Remove node |
-| `up` / `down` / `restart` | Service lifecycle |
-| `status` / `logs` | Status & logs |
-| `core-update` | Update Xray-core binary |
-| `edit` / `edit-env` | Edit configs |
-| `setup-logs` | Configure log rotation |
-| `xray_log_out` / `xray_log_err` | Xray real-time logs |
-| `auto-restart` | Configure scheduled auto-restart (enable/disable/status/test) |
+### 5. 🔥 UFW Firewall (пункт 22)
 
-</details>
+Настройка файрвола в процессе установки и управление из меню.
 
-### Highlights
+```bash
+remnanode ufw   # или пункт 22 в меню
+```
 
-- **Xray-core** — auto-detection, interactive version selection, pre-release support
-- **NET_ADMIN capability** (v4.2.0+) — auto-added for IP Management features (view/drop user connections). Auto-migrated on `update`
-- **Log rotation** — 50MB max, 5 files, compressed, no downtime
-- **Config migration** (v2.2.2+) — `APP_PORT` → `NODE_PORT`, `SSL_CERT` → `SECRET_KEY` (auto on `update`)
-- **Dual config** — supports both `.env` and inline docker-compose variables
+Опросник при установке:
 
-<details>
-<summary><b>📂 File Structure</b></summary>
+```
+SSH порт                   [22]
+IP Панели Remnawave        (пусто = открыть для всех)
+Открыть 443/tcp (Xray)     [Y/n]
+```
 
-```text
+Итоговые правила UFW:
+- SSH — открыт для всех
+- Порт ноды — только с IP панели (если указан) или для всех
+- 443/tcp — открыт для Xray Reality
+- Остальное входящее — запрещено
+
+> **Примечание:** Порт Caddy selfsteal (9443) не нужно открывать в UFW — он доступен только через loopback `127.0.0.1` и не доступен снаружи.
+
+---
+
+### 6. 📋 Xray Profile Config (пункт 21)
+
+После установки и в любой момент из меню показывается готовый JSON-конфиг для вставки в профиль ноды Remnawave с автоматически подставленными значениями:
+
+```bash
+remnanode profile-config   # или пункт 21 в меню
+```
+
+Автоматически подставляются:
+- **domain** — из `/opt/caddy/.env` (`SELF_STEAL_DOMAIN`)
+- **target port** — из `/opt/caddy/.env` (`SELF_STEAL_PORT`)
+- **privateKey** — генерируется командой `xray x25519` из локального бинарника
+
+Если selfsteal не установлен — показывается шаблон с placeholder'ами.
+
+---
+
+### 7. 🪵 Порядок отображения после установки
+
+**Оригинал:** после запуска контейнера сразу шли логи (`docker compose logs -f`), и при Ctrl+C вся информация терялась.
+
+**Форк:** итоговый экран и Profile Config показываются **до** логов. Логи запускаются только по нажатию Enter:
+
+```
+Нажмите Enter чтобы посмотреть логи контейнера (Ctrl+C чтобы выйти)...
+```
+
+---
+
+## 📋 Полный список пунктов меню `remnanode`
+
+| № | Команда | Описание |
+|---|---------|----------|
+| 1 | `install` | Установить RemnaNode |
+| 2 | `up` | Запустить |
+| 3 | `down` | Остановить |
+| 4 | `restart` | Перезапустить |
+| 5 | `uninstall` | Удалить |
+| 6 | `status` | Статус |
+| 7 | `logs` | Логи контейнера |
+| 8 | `xray-log-out` | Xray access лог |
+| 9 | `xray-log-err` | Xray error лог |
+| 10 | `update` | Обновить скрипт и контейнер |
+| 11 | `core-update` | Обновить Xray-core |
+| 12 | `migrate` | Миграция переменных окружения |
+| 13 | `edit` | Редактировать docker-compose.yml |
+| 14 | `edit-env` | Редактировать .env |
+| 15 | `ports` | Показать порты |
+| 16 | `setup-logs` | Настроить logrotate |
+| 17 | `auto-restart` | Расписание автоперезапуска |
+| 18 | `fail2ban` | 🆕 Fail2ban менеджер |
+| 19 | `torrent-blocker` | 🆕 Xray Torrent Blocker |
+| 20 | `net-opt` | 🆕 Сетевые оптимизации (BBR / IPv6) |
+| 21 | `profile-config` | 🆕 Показать конфиг профиля Xray |
+| 22 | `ufw` | 🆕 UFW Firewall менеджер |
+
+---
+
+## 🛰 RemnaNode — Процесс установки
+
+Интерактивная установка последовательно предлагает:
+
+1. Параметры ноды — порт, SECRET_KEY, установка Xray-core
+2. Caddy Selfsteal — для Reality-маскировки (если не установлен)
+3. Fail2ban — защита от брутфорса
+4. Xray Torrent Blocker — блокировка торрент-трафика
+5. BBR + CAKE — оптимизация TCP
+6. Отключение IPv6
+7. UFW Firewall — настройка правил доступа
+8. Запуск контейнера
+9. Итоговая информация + Xray Profile Config
+10. Логи — по нажатию Enter
+
+---
+
+## 📁 Структура файлов
+
+```
 /opt/remnanode/
 ├── .env
 └── docker-compose.yml
 
-/var/lib/remnanode/       # Xray binary & logs
-/usr/local/bin/remnanode  # CLI command
-/etc/logrotate.d/remnanode
-```
+/var/lib/remnanode/
+└── xray                  # Xray-core бинарник (если установлен)
 
-</details>
+/var/log/remnanode/
+├── access.log            # Xray access лог (читается tblocker)
+└── error.log
+
+/opt/caddy/               # Caddy selfsteal (если установлен)
+├── .env                  # SELF_STEAL_DOMAIN, SELF_STEAL_PORT
+├── Caddyfile
+└── docker-compose.yml
+
+/usr/local/bin/remnanode  # CLI-команда
+```
 
 ---
 
-## 🎭 Caddy Selfsteal (Reality Masking)
+## ⚙️ Системные требования
 
-Deploy Caddy as a **Reality traffic masking** solution with professional website templates for HTTPS camouflage.
+| | Минимум |
+|--|---------|
+| **CPU** | 1 ядро |
+| **RAM** | 512 MB |
+| **Диск** | 2 GB |
+| **ОС** | Ubuntu 20.04+, Debian 11+, CentOS 7+, AlmaLinux 8+ |
 
-### Installation
-
-```bash
-bash <(curl -Ls https://github.com/DigneZzZ/remnawave-scripts/raw/main/selfsteal.sh) @ install
-```
-
-### Commands
-
-| Command | Description |
-|---------|-------------|
-| `install` / `uninstall` | Install or remove |
-| `up` / `down` / `restart` | Service lifecycle |
-| `status` / `logs` | Status & logs |
-| `template` | Manage website templates |
-| `edit` | Edit Caddyfile |
-| `guide` | Reality integration guide |
-| `update` | Update script |
-
-### Templates
-
-8 pre-built website templates: `10gag`, `converter`, `downloader`, `filecloud`, `games-site`, `modmanager`, `speedtest`, `YouTube`.
-
-```bash
-selfsteal template list              # List templates
-selfsteal template install converter # Install template
-```
-
-**Xray Reality config:**
-```json
-{ "realitySettings": { "dest": "127.0.0.1:9443", "serverNames": ["your-domain.com"] } }
-```
-
-<details>
-<summary><b>📂 File Structure</b></summary>
-
-```text
-/opt/caddy/
-├── .env, docker-compose.yml, Caddyfile
-├── logs/
-└── html/           # Template content
-    ├── index.html, 404.html
-    └── assets/
-
-/usr/local/bin/selfsteal
-```
-
-</details>
+**Зависимости** (устанавливаются автоматически): Docker Engine, Docker Compose V2, curl, openssl
 
 ---
 
-## ⚙️ System Requirements
+## 🔗 Ссылки
 
-| | Minimum | Recommended |
-|---|---------|-------------|
-| **CPU** | 1 core | 2+ cores |
-| **RAM** | 512 MB | 2 GB+ |
-| **Storage** | 2 GB | 10 GB+ SSD |
-| **Network** | Stable | 100 Mbps+ |
-
-**OS:** Ubuntu 18.04+, Debian 10+, CentOS 7+, AlmaLinux 8+, Fedora 32+, Arch, openSUSE 15+
-
-**Dependencies** (auto-installed): Docker Engine, Docker Compose V2, curl, openssl, jq, tar/gzip
+| | |
+|--|--|
+| **Этот форк** | [github.com/saveksme/remnawave-scripts](https://github.com/saveksme/remnawave-scripts) |
+| **Оригинальный скрипт** | [github.com/DigneZzZ/remnawave-scripts](https://github.com/DigneZzZ/remnawave-scripts) |
+| **Remnawave** | [github.com/remnawave](https://github.com/remnawave) |
+| **tblocker** | [repo.remna.dev](https://repo.remna.dev) |
+| **Поддержка оригинала** | [gig.ovh](https://gig.ovh) |
 
 ---
 
-## 🔐 Security
+## 📜 Лицензия
 
-- Services bind to `127.0.0.1` by default
-- Auto-generated DB credentials, JWT secrets, API tokens
-- UFW/firewalld guidance during setup
-- SSL/TLS via Caddy with DNS validation
-
-<details>
-<summary><b>🔒 Production Hardening</b></summary>
-
-```bash
-sudo ufw default deny incoming
-sudo ufw default allow outgoing
-sudo ufw allow ssh
-sudo ufw allow from trusted_ip to any port panel_port
-sudo ufw enable
-```
-
-</details>
-
----
-
-## 📊 Monitoring & Logs
-
-```bash
-remnawave status && remnanode status && selfsteal status  # Service status
-remnawave logs --follow    # Real-time logs
-docker stats               # Resource usage
-```
-
-<details>
-<summary><b>📋 Log Locations</b></summary>
-
-| Component | Path |
-|-----------|------|
-| Panel | `/opt/remnawave/logs/` |
-| Node (Xray) | `/var/lib/remnanode/` |
-| Caddy | `/opt/caddy/logs/` |
-
-Log rotation: 50MB max, 5 files kept, compressed automatically.
-
-</details>
-
----
-
-## 🧩 Other Scripts
-
-This repository also includes additional utility scripts for network management and VPN setup.
-
-### 🌐 WTM — WARP & Tor Manager
-
-Professional tool for managing **Cloudflare WARP** and **Tor** on Linux servers. Includes XRay integration, interactive menus, and auto-updates.
-
-```bash
-# Install as global command
-sudo bash <(curl -Ls https://github.com/DigneZzZ/remnawave-scripts/raw/main/wtm.sh) @ install-script
-
-# Or run directly
-bash <(curl -Ls https://github.com/DigneZzZ/remnawave-scripts/raw/main/wtm.sh)
-
-# Install both WARP and Tor
-sudo wtm install-all
-```
-
-Key features: WARP (WireGuard), Tor SOCKS5 proxy, XRay routing for `.onion` domains, connection testing, service monitoring.
-
-📖 Full documentation: [README-warp.md](./README-warp.md)
-
-### 🐦 NetBird — VPN Installer
-
-Quick installer for [NetBird](https://netbird.io/) mesh VPN. Supports CLI, cloud-init, interactive menu, and Ansible modes.
-
-```bash
-# CLI installation
-bash <(curl -Ls https://github.com/DigneZzZ/remnawave-scripts/raw/main/netbird.sh) install --key YOUR-SETUP-KEY
-
-# Auto-install for cloud-init / provisioning
-bash <(curl -Ls https://github.com/DigneZzZ/remnawave-scripts/raw/main/netbird.sh) init --key YOUR-SETUP-KEY
-
-# Interactive menu
-bash <(curl -Ls https://github.com/DigneZzZ/remnawave-scripts/raw/main/netbird.sh) menu
-```
-
-Key features: one-liner install, SSH access between peers (`--ssh`), auto-firewall setup (UFW/firewalld), Ansible-friendly mode.
-
-📖 Full documentation: [README-netbird.md](./README-netbird.md)
-
----
-
-## 🤝 Contributing
-
-1. Fork → branch → make changes → test → PR
-2. Follow existing code style, test on multiple distros
-3. Check [existing issues](https://github.com/DigneZzZ/remnawave-scripts/issues) before reporting bugs
-
----
-
-## 📜 License
-
-[MIT License](./LICENSE) — free for commercial and private use.
-
----
-
-<div align="center">
-
-**⭐ Star this project if you find it useful!**
-
-[Report Bug](https://github.com/DigneZzZ/remnawave-scripts/issues) · [Request Feature](https://github.com/DigneZzZ/remnawave-scripts/issues) · [Community: gig.ovh](https://gig.ovh)
-
-</div>
+[MIT License](./LICENSE) — форк оригинального проекта DigneZzZ.
