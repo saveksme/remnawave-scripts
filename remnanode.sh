@@ -769,18 +769,22 @@ install_selfsteal() {
 # Detect actual HTTPS port of caddy-selfsteal
 get_caddy_https_port() {
     local port
-    # 1. Try .env in /opt/caddy
+    # 1. Try SELF_STEAL_PORT from .env (used by selfsteal.sh)
+    port=$(grep -E "^SELF_STEAL_PORT=" /opt/caddy/.env 2>/dev/null | cut -d= -f2 | tr -d '[:space:]')
+    [ -n "$port" ] && { echo "$port"; return; }
+
+    # 2. Try HTTPS_PORT from .env (legacy)
     port=$(grep -E "^HTTPS_PORT=" /opt/caddy/.env 2>/dev/null | cut -d= -f2 | tr -d '[:space:]')
     [ -n "$port" ] && { echo "$port"; return; }
 
-    # 2. Try docker inspect port bindings (skip port 80)
+    # 3. Try docker inspect port bindings (skip port 80)
     port=$(docker inspect "$CADDY_SELFSTEAL_CONTAINER" \
         --format='{{range $p,$b := .NetworkSettings.Ports}}{{if $b}}{{(index $b 0).HostPort}} {{$p}}{{"\n"}}{{end}}{{end}}' \
         2>/dev/null | grep -v "^80[[:space:]]" | awk 'NR==1{print $1}')
     [ -n "$port" ] && { echo "$port"; return; }
 
-    # 3. Fallback
-    echo "443"
+    # 4. Fallback
+    echo "9443"
 }
 
 # Detect domain of caddy-selfsteal
@@ -953,11 +957,15 @@ print_xray_profile_config() {
         tag_name="VLESS_TCP_REALITY"
     fi
 
-    # Generate fresh Reality private key from running container
-    if docker inspect --format='{{.State.Running}}' "$APP_NAME" 2>/dev/null | grep -q "^true$"; then
+    # Generate fresh Reality private key using host xray binary
+    if [ -f "$XRAY_FILE" ] && [ -x "$XRAY_FILE" ]; then
+        private_key=$("$XRAY_FILE" x25519 2>/dev/null | grep "Private key:" | awk '{print $NF}')
+    fi
+    # Fallback: try docker exec if container is running
+    if [ -z "$private_key" ] && docker inspect --format='{{.State.Running}}' "$APP_NAME" 2>/dev/null | grep -q "^true$"; then
         private_key=$(docker exec "$APP_NAME" xray x25519 2>/dev/null | grep "Private key:" | awk '{print $NF}')
     fi
-    private_key="${private_key:-<generate: docker exec $APP_NAME xray x25519>}"
+    private_key="${private_key:-<generate: $XRAY_FILE x25519>}"
 
     echo
     echo -e "\033[38;5;8m$(printf '─%.0s' $(seq 1 70))\033[0m"
