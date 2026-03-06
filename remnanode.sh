@@ -1659,40 +1659,19 @@ torrent_blocker_logs() {
         colorized_echo yellow "   Логи недоступны"
 }
 
-tblocker_get_block_mode() {
-    grep "^BlockMode:" "$TBLOCKER_CONFIG" 2>/dev/null | awk '{print $2}' | tr -d '"' || echo "iptables"
-}
-
 tblocker_get_storage_dir() {
     local dir
     dir=$(grep "^StorageDir:" "$TBLOCKER_CONFIG" 2>/dev/null | awk '{print $2}' | tr -d '"')
     echo "${dir:-$TBLOCKER_DIR}"
 }
 
-# Find the iptables chain where tblocker stores its blocks.
-tblocker_detect_chain() {
-    local name
-    # 1. Always check known tblocker chain names first (even if empty)
-    for name in TBLOCKER_BLOCKED TBLOCKER tblocker TORRENT torrent-blocker; do
-        if iptables -L "$name" -n >/dev/null 2>&1; then
-            echo "$name"; return 0
-        fi
-    done
-    return 1
-}
+TBLOCKER_CHAIN="TBLOCKER_BLOCKED"
 
-# Print a formatted table of DROP/REJECT rules from a given iptables chain
-_tblocker_print_chain_rules() {
-    local chain="$1"
-    local count
-    count=$(iptables -L "$chain" -n 2>/dev/null | grep -cE "DROP|REJECT")
-    printf "   \033[38;5;15m%-20s\033[0m \033[1;33m%s\033[0m \033[38;5;244m(цепочка: %s)\033[0m\n" \
-        "Заблокировано IP:" "$count" "$chain"
-    echo
-    printf "   \033[38;5;244m%-6s  %-20s  %s\033[0m\n" "№" "IP-адрес" "Пакетов"
-    echo -e "   \033[38;5;8m$(printf '─%.0s' $(seq 1 42))\033[0m"
-    iptables -L "$chain" -n --line-numbers 2>/dev/null | grep -E "DROP|REJECT" | \
-        awk '{printf "   \033[38;5;15m%-6s\033[0m  \033[38;5;117m%-20s\033[0m  \033[38;5;244m%s\033[0m\n", $1, $5, $2}'
+tblocker_ensure_chain() {
+    if ! iptables -L "$TBLOCKER_CHAIN" -n >/dev/null 2>&1; then
+        iptables -N "$TBLOCKER_CHAIN" 2>/dev/null || true
+        iptables -I INPUT -j "$TBLOCKER_CHAIN" 2>/dev/null || true
+    fi
 }
 
 tblocker_list_banned() {
@@ -1701,68 +1680,65 @@ tblocker_list_banned() {
     echo -e "\033[38;5;8m$(printf '─%.0s' $(seq 1 55))\033[0m"
     echo
 
-    local mode found=false
-    mode=$(tblocker_get_block_mode)
+    local found=false
+    local storage_dir; storage_dir=$(tblocker_get_storage_dir)
 
-    # nftables
-    if [ "$mode" = "nftables" ]; then
-        local ips
-        ips=$(nft list set inet tblocker blocked_ips 2>/dev/null | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}')
-        if [ -n "$ips" ]; then
-            local count; count=$(echo "$ips" | wc -l)
-            printf "   \033[38;5;15m%-20s\033[0m \033[1;33m%s\033[0m\n" "Заблокировано IP:" "$count"
-            echo
-            printf "   \033[38;5;244m%-6s  %-20s\033[0m\n" "№" "IP-адрес"
-            echo -e "   \033[38;5;8m$(printf '─%.0s' $(seq 1 30))\033[0m"
-            echo "$ips" | nl -w6 | awk '{printf "   \033[38;5;15m%-6s\033[0m  \033[38;5;117m%s\033[0m\n", $1, $2}'
-            found=true
-        else
-            colorized_echo gray "   Нет заблокированных IP (nftables)"
-        fi
-        return
+    # Source 1: iptables chain TBLOCKER_BLOCKED
+    local chain_ips=""
+    if iptables -L "$TBLOCKER_CHAIN" -n -v >/dev/null 2>&1; then
+        chain_ips=$(iptables -L "$TBLOCKER_CHAIN" -n -v 2>/dev/null | grep -E "DROP|REJECT" | awk '{print $8}' | grep -E '^[0-9]+\.' || true)
     fi
 
-    # iptables: auto-detect chain
-    local chain
-    chain=$(tblocker_detect_chain) || true
-    if [ -n "$chain" ]; then
-        local rule_count
-        rule_count=$(iptables -L "$chain" -n 2>/dev/null | grep -cE "DROP|REJECT" || echo 0)
-        if [ "$rule_count" -gt 0 ]; then
-            _tblocker_print_chain_rules "$chain"
-            found=true
-        else
+    # Source 2: blocked_ips.json
+    local json_ips=""
+    local blocked_file="$storage_dir/blocked_ips.json"
+    if [ -f "$blocked_file" ]; then
+        json_ips=$(grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' "$blocked_file" 2>/dev/null | grep -v "^127\.\|^0\." || true)
+    fi
+
+    # Merge unique IPs from both sources
+    local all_ips
+    all_ips=$(printf "%s\n%s" "$chain_ips" "$json_ips" | grep -E '^[0-9]+\.' | sort -u || true)
+
+    if [ -n "$all_ips" ]; then
+        local count; count=$(echo "$all_ips" | wc -l)
+        printf "   \033[38;5;15m%-20s\033[0m \033[1;33m%s\033[0m\n" "Заблокировано IP:" "$count"
+        echo
+        printf "   \033[38;5;244m%-6s  %-20s  %s\033[0m\n" "№" "IP-адрес" "Источник"
+        echo -e "   \033[38;5;8m$(printf '─%.0s' $(seq 1 46))\033[0m"
+        local idx=1
+        while IFS= read -r ip; do
+            local src=""
+            echo "$chain_ips" | grep -q "^${ip}$" 2>/dev/null && src="iptables"
+            echo "$json_ips" | grep -q "^${ip}$" 2>/dev/null && { [ -n "$src" ] && src="$src+json" || src="json"; }
+            printf "   \033[38;5;15m%-6s\033[0m  \033[38;5;117m%-20s\033[0m  \033[38;5;244m%s\033[0m\n" "$idx" "$ip" "$src"
+            idx=$((idx + 1))
+        done <<< "$all_ips"
+        found=true
+    fi
+
+    if [ "$found" = false ]; then
+        if iptables -L "$TBLOCKER_CHAIN" -n >/dev/null 2>&1; then
             printf "   \033[38;5;15m%-20s\033[0m \033[38;5;250m%s\033[0m \033[38;5;244m(цепочка: %s)\033[0m\n" \
-                "Заблокировано IP:" "0" "$chain"
-            colorized_echo gray "   Цепочка пуста — активных банов нет"
-            found=true
+                "Заблокировано IP:" "0" "$TBLOCKER_CHAIN"
+            colorized_echo gray "   Активных банов нет"
+        else
+            colorized_echo gray "   Цепочка $TBLOCKER_CHAIN не найдена"
+            colorized_echo gray "   Убедитесь что tblocker запущен: systemctl status tblocker"
         fi
     fi
 
-    # Check blocked_ips.json in StorageDir
-    if [ "$found" = false ]; then
-        local storage_dir; storage_dir=$(tblocker_get_storage_dir)
-        local blocked_file="$storage_dir/blocked_ips.json"
-        if [ -f "$blocked_file" ] && [ "$(wc -c < "$blocked_file")" -gt 5 ]; then
-            local file_ips
-            file_ips=$(grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' "$blocked_file" 2>/dev/null | grep -v "^127\.\|^0\.\|^::1")
-            if [ -n "$file_ips" ]; then
-                local fcount; fcount=$(echo "$file_ips" | wc -l)
-                printf "   \033[38;5;15m%-20s\033[0m \033[1;33m%s\033[0m \033[38;5;244m(из blocked_ips.json)\033[0m\n" \
-                    "Заблокировано IP:" "$fcount"
-                echo
-                printf "   \033[38;5;244m%-6s  %-20s\033[0m\n" "№" "IP-адрес"
-                echo -e "   \033[38;5;8m$(printf '─%.0s' $(seq 1 30))\033[0m"
-                echo "$file_ips" | sort -u | nl -w6 | \
-                    awk '{printf "   \033[38;5;15m%-6s\033[0m  \033[38;5;117m%s\033[0m\n", $1, $2}'
-                found=true
-            fi
-        fi
-    fi
-
-    if [ "$found" = false ]; then
-        colorized_echo gray "   Нет заблокированных IP"
-        colorized_echo gray "   Режим: $mode  |  Конфиг: $TBLOCKER_CONFIG"
+    # Show iptables debug info
+    echo
+    colorized_echo gray "   ── Отладка ──"
+    local tb_rules
+    tb_rules=$(iptables -S 2>/dev/null | grep -i tblocker || true)
+    if [ -n "$tb_rules" ]; then
+        echo "$tb_rules" | while IFS= read -r r; do
+            colorized_echo gray "   $r"
+        done
+    else
+        colorized_echo gray "   Нет iptables правил с 'tblocker'"
     fi
 }
 
@@ -1781,32 +1757,19 @@ tblocker_ban_ip() {
         colorized_echo red "❌ Некорректный формат: $ban_ip"; return 1
     fi
 
-    local mode; mode=$(tblocker_get_block_mode)
+    # Ensure chain exists
+    tblocker_ensure_chain
 
-    if [ "$mode" = "nftables" ]; then
-        if nft add element inet tblocker blocked_ips "{ $ban_ip }" 2>/dev/null; then
-            colorized_echo green "✅ IP $ban_ip заблокирован (nftables)"
-        else
-            colorized_echo red "❌ Ошибка блокировки (nftables)"
-        fi
-        return
+    if iptables -I "$TBLOCKER_CHAIN" 1 -s "$ban_ip" -j DROP 2>/dev/null; then
+        colorized_echo green "✅ IP $ban_ip заблокирован ($TBLOCKER_CHAIN)"
+    else
+        colorized_echo red "❌ Ошибка добавления в $TBLOCKER_CHAIN"
+        return 1
     fi
 
-    # iptables: find chain (even if empty — for adding rules)
-    local chain; chain=$(tblocker_detect_chain false) || true
-
-    if [ -n "$chain" ]; then
-        if iptables -I "$chain" 1 -s "$ban_ip" -j DROP 2>/dev/null; then
-            colorized_echo green "✅ IP $ban_ip заблокирован (цепочка $chain)"
-        else
-            colorized_echo red "❌ Ошибка добавления в цепочку $chain"
-        fi
-    else
-        if iptables -I INPUT 1 -s "$ban_ip" -j DROP -m comment --comment "tblocker" 2>/dev/null; then
-            colorized_echo green "✅ IP $ban_ip заблокирован (INPUT chain)"
-        else
-            colorized_echo red "❌ Ошибка добавления правила iptables"
-        fi
+    # Verify
+    if iptables -L "$TBLOCKER_CHAIN" -n 2>/dev/null | grep -q "$ban_ip"; then
+        colorized_echo green "   Проверка: IP найден в цепочке ✅"
     fi
 }
 
@@ -1814,71 +1777,60 @@ tblocker_unban_ip() {
     echo
     colorized_echo cyan "🔓 Разблокировать IP"
     echo -e "\033[38;5;8m$(printf '─%.0s' $(seq 1 55))\033[0m"
+    echo
 
-    local mode; mode=$(tblocker_get_block_mode)
+    read -p "$(echo -e "   \033[38;5;15mIP-адрес\033[0m для разблокировки: ")" unban_ip
+    unban_ip=$(echo "$unban_ip" | tr -d '[:space:]')
+    [ -z "$unban_ip" ] && return
 
-    if [ "$mode" = "nftables" ]; then
-        echo
-        read -p "$(echo -e "   \033[38;5;15mIP-адрес\033[0m для разблокировки: ")" unban_ip
-        unban_ip=$(echo "$unban_ip" | tr -d '[:space:]')
-        if nft delete element inet tblocker blocked_ips "{ $unban_ip }" 2>/dev/null; then
-            colorized_echo green "✅ IP $unban_ip разблокирован"
-        else
-            colorized_echo red "❌ IP $unban_ip не найден"
-        fi
-        return
+    local removed=false
+    local storage_dir; storage_dir=$(tblocker_get_storage_dir)
+
+    # 1. Remove from TBLOCKER_BLOCKED chain (by line number, reverse order)
+    if iptables -L "$TBLOCKER_CHAIN" -n --line-numbers 2>/dev/null | grep -q "$unban_ip"; then
+        iptables -L "$TBLOCKER_CHAIN" -n --line-numbers 2>/dev/null | grep "$unban_ip" | awk '{print $1}' | tac | while read -r line_num; do
+            iptables -D "$TBLOCKER_CHAIN" "$line_num" 2>/dev/null
+        done
+        colorized_echo green "✅ Удалён из цепочки $TBLOCKER_CHAIN"
+        removed=true
     fi
 
-    # iptables: find the chain that has rules
-    local chain; chain=$(tblocker_detect_chain) || true
+    # 2. Remove any other iptables rules with this IP
+    iptables -S 2>/dev/null | grep "$unban_ip" | while IFS= read -r rule; do
+        delete_rule=$(echo "$rule" | sed 's/-A /-D /')
+        iptables $delete_rule 2>/dev/null || true
+    done
 
-    if [ -n "$chain" ]; then
-        echo
-        printf "   \033[38;5;244m%-6s  %-20s\033[0m\n" "№" "IP-адрес"
-        echo -e "   \033[38;5;8m$(printf '─%.0s' $(seq 1 30))\033[0m"
-        iptables -L "$chain" -n --line-numbers 2>/dev/null | grep -E "DROP|REJECT" | \
-            awk '{printf "   \033[38;5;15m%-6s\033[0m  \033[38;5;117m%s\033[0m\n", $1, $5}'
-        echo
-        read -p "$(echo -e "   Введите \033[38;5;117m№ правила\033[0m или \033[38;5;117mIP-адрес\033[0m: ")" unban_input
-        unban_input=$(echo "$unban_input" | tr -d '[:space:]')
-        [ -z "$unban_input" ] && return
+    # 3. Remove from blocked_ips.json
+    local blocked_file="$storage_dir/blocked_ips.json"
+    if [ -f "$blocked_file" ] && grep -q "$unban_ip" "$blocked_file" 2>/dev/null; then
+        grep -v "$unban_ip" "$blocked_file" > "$blocked_file.tmp" 2>/dev/null || true
+        mv -f "$blocked_file.tmp" "$blocked_file"
+        colorized_echo green "✅ Удалён из blocked_ips.json"
+        removed=true
+    fi
 
-        if echo "$unban_input" | grep -qE "^[0-9]+$"; then
-            if iptables -D "$chain" "$unban_input" 2>/dev/null; then
-                colorized_echo green "✅ Правило №$unban_input удалено из $chain"
-            else
-                colorized_echo red "❌ Не удалось удалить правило №$unban_input"
-            fi
-        else
-            # Try removing by IP from all chains that might have it
-            local removed=false
-            local c
-            while IFS= read -r c; do
-                if iptables -D "$c" -s "$unban_input" -j DROP 2>/dev/null || \
-                   iptables -D "$c" -s "$unban_input" -j REJECT 2>/dev/null; then
-                    colorized_echo green "✅ IP $unban_input разблокирован (из $c)"
-                    removed=true
-                fi
-            done < <(iptables -L -n 2>/dev/null | grep "^Chain" | awk '{print $2}')
-            [ "$removed" = false ] && colorized_echo red "❌ IP $unban_input не найден ни в одной цепочке"
+    # 4. Clean from any other storage files
+    find "$storage_dir" -type f \( -name "*.json" -o -name "*.db" \) ! -name "config.yaml*" 2>/dev/null | while read -r f; do
+        if grep -q "$unban_ip" "$f" 2>/dev/null; then
+            sed -i "/$unban_ip/d" "$f" 2>/dev/null || true
         fi
+    done
+
+    # 5. Flush conntrack entries
+    conntrack -D -s "$unban_ip" 2>/dev/null || true
+    conntrack -D -d "$unban_ip" 2>/dev/null || true
+
+    # 6. Restart tblocker
+    if is_torrent_blocker_active; then
+        systemctl restart "$TBLOCKER_SERVICE" 2>/dev/null || true
+        colorized_echo gray "   tblocker перезапущен"
+    fi
+
+    if [ "$removed" = true ]; then
+        colorized_echo green "✅ IP $unban_ip полностью разблокирован"
     else
-        # No blocked IPs found — ask for IP directly and try all chains
-        echo
-        colorized_echo gray "   Активных блокировок не обнаружено"
-        read -p "$(echo -e "   Всё равно ввести \033[38;5;15mIP\033[0m для удаления: ")" unban_ip
-        unban_ip=$(echo "$unban_ip" | tr -d '[:space:]')
-        [ -z "$unban_ip" ] && return
-        local removed=false
-        local c
-        while IFS= read -r c; do
-            if iptables -D "$c" -s "$unban_ip" -j DROP 2>/dev/null || \
-               iptables -D "$c" -s "$unban_ip" -j DROP -m comment --comment "tblocker" 2>/dev/null; then
-                colorized_echo green "✅ IP $unban_ip удалён из цепочки $c"
-                removed=true
-            fi
-        done < <(iptables -L -n 2>/dev/null | grep "^Chain" | awk '{print $2}')
-        [ "$removed" = false ] && colorized_echo red "❌ IP $unban_ip не найден"
+        colorized_echo yellow "⚠️  IP $unban_ip не найден в активных блокировках"
     fi
 }
 
