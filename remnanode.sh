@@ -1989,6 +1989,268 @@ net_opt_menu() {
     done
 }
 
+# =====================================
+# UFW FIREWALL INTEGRATION
+# =====================================
+
+is_ufw_installed() {
+    command -v ufw >/dev/null 2>&1
+}
+
+is_ufw_active() {
+    ufw status 2>/dev/null | grep -q "^Status: active"
+}
+
+install_ufw_pkg() {
+    if command -v apt-get >/dev/null 2>&1; then
+        apt-get install -y ufw >/dev/null 2>&1
+    elif command -v yum >/dev/null 2>&1; then
+        yum install -y ufw >/dev/null 2>&1
+    elif command -v dnf >/dev/null 2>&1; then
+        dnf install -y ufw >/dev/null 2>&1
+    else
+        return 1
+    fi
+}
+
+apply_ufw_rules() {
+    local ssh_port="$1"
+    local panel_ip="$2"
+    local node_port="$3"
+    local open_xray="$4"   # "true"/"false"
+    local selfsteal_port="$5"
+
+    ufw --force reset >/dev/null 2>&1
+    ufw default deny incoming >/dev/null 2>&1
+    ufw default allow outgoing >/dev/null 2>&1
+
+    # SSH
+    ufw allow "${ssh_port}/tcp" >/dev/null 2>&1
+
+    # Node port
+    if [ -n "$panel_ip" ]; then
+        ufw allow from "$panel_ip" to any port "$node_port" proto tcp >/dev/null 2>&1
+    else
+        ufw allow "${node_port}/tcp" >/dev/null 2>&1
+    fi
+
+    # Xray / Reality (443)
+    if [ "$open_xray" = "true" ]; then
+        ufw allow 443/tcp >/dev/null 2>&1
+    fi
+
+    # Selfsteal Caddy port (if different from 443)
+    if [ -n "$selfsteal_port" ] && [ "$selfsteal_port" != "443" ]; then
+        ufw allow "${selfsteal_port}/tcp" >/dev/null 2>&1
+    fi
+
+    ufw --force enable >/dev/null 2>&1
+}
+
+configure_ufw_integration() {
+    echo
+    echo -e "\033[1;37m🔥 UFW Firewall — защита портов сервера\033[0m"
+    echo -e "\033[38;5;8m$(printf '─%.0s' $(seq 1 55))\033[0m"
+
+    if [ "$FORCE_MODE" = "true" ]; then
+        colorized_echo gray "   Пропуск настройки UFW (автоматический режим)"
+        return 0
+    fi
+
+    colorized_echo gray "   Настроит правила входящих соединений и активирует файрвол"
+    echo
+    read -p "Настроить UFW Firewall? [y/N]: " -r setup_ufw
+    if [[ ! $setup_ufw =~ ^[Yy]$ ]]; then
+        colorized_echo gray "   Пропускаем. Настроить позже: remnanode ufw"
+        return 0
+    fi
+
+    echo
+    echo -e "\033[38;5;8m$(printf '─%.0s' $(seq 1 55))\033[0m"
+    echo -e "\033[1;37m  ⚙️  Настройка доступа\033[0m"
+    echo -e "\033[38;5;8m$(printf '─%.0s' $(seq 1 55))\033[0m"
+    echo
+
+    local ssh_port panel_ip open_xray_ans selfsteal_port caddy_port
+    caddy_port=$(get_caddy_https_port)
+
+    # SSH port
+    read -p "$(printf "   \033[38;5;15m%-22s\033[0m [\033[38;5;117m22\033[0m]: " "SSH порт")" ssh_port
+    ssh_port=${ssh_port:-22}
+
+    # Panel IP
+    read -p "$(printf "   \033[38;5;15m%-22s\033[0m \033[38;5;244m(пусто = открыть для всех)\033[0m\n   → " "IP Панели Remnawave")" panel_ip
+    panel_ip=$(echo "$panel_ip" | tr -d '[:space:]')
+
+    # Xray Reality port 443
+    echo
+    read -p "$(printf "   \033[38;5;15m%-22s\033[0m [Y/n]: " "Открыть 443/tcp (Xray Reality)")" open_xray_ans
+    if [[ "$open_xray_ans" =~ ^[Nn]$ ]]; then
+        open_xray="false"
+    else
+        open_xray="true"
+    fi
+
+    # Selfsteal Caddy port (if detected and different from 443)
+    if check_caddy_selfsteal 2>/dev/null && [ "$caddy_port" != "443" ]; then
+        echo
+        read -p "$(printf "   \033[38;5;15m%-22s\033[0m [Y/n]: " "Открыть ${caddy_port}/tcp (Caddy selfsteal)")" open_caddy_ans
+        if [[ "$open_caddy_ans" =~ ^[Nn]$ ]]; then
+            selfsteal_port=""
+        else
+            selfsteal_port="$caddy_port"
+        fi
+    fi
+
+    echo
+    echo -e "\033[38;5;8m$(printf '─%.0s' $(seq 1 55))\033[0m"
+    echo -e "\033[1;37m  📋 Итоговые правила UFW:\033[0m"
+    echo -e "\033[38;5;8m$(printf '─%.0s' $(seq 1 55))\033[0m"
+    printf "   \033[38;5;15m%-26s\033[0m \033[38;5;250m%s\033[0m\n" "SSH:" "${ssh_port}/tcp → разрешить"
+    if [ -n "$panel_ip" ]; then
+        printf "   \033[38;5;15m%-26s\033[0m \033[38;5;250m%s\033[0m\n" "Порт ноды (${NODE_PORT}):" "только с ${panel_ip}"
+    else
+        printf "   \033[38;5;15m%-26s\033[0m \033[38;5;250m%s\033[0m\n" "Порт ноды (${NODE_PORT}):" "для всех"
+    fi
+    if [ "$open_xray" = "true" ]; then
+        printf "   \033[38;5;15m%-26s\033[0m \033[38;5;250m%s\033[0m\n" "Xray Reality:" "443/tcp → разрешить"
+    fi
+    if [ -n "$selfsteal_port" ]; then
+        printf "   \033[38;5;15m%-26s\033[0m \033[38;5;250m%s\033[0m\n" "Caddy selfsteal:" "${selfsteal_port}/tcp → разрешить"
+    fi
+    printf "   \033[38;5;15m%-26s\033[0m \033[38;5;250m%s\033[0m\n" "Остальное входящее:" "запретить"
+    echo
+
+    read -p "Применить и включить UFW? [Y/n]: " -r confirm_ufw
+    if [[ "$confirm_ufw" =~ ^[Nn]$ ]]; then
+        colorized_echo gray "   Отменено."
+        return 0
+    fi
+
+    if ! is_ufw_installed; then
+        colorized_echo cyan "📦 Устанавливаем ufw..."
+        if ! install_ufw_pkg; then
+            colorized_echo red "❌ Не удалось установить ufw"
+            return 1
+        fi
+    fi
+
+    colorized_echo cyan "🔧 Применяем правила..."
+    apply_ufw_rules "$ssh_port" "$panel_ip" "$NODE_PORT" "$open_xray" "$selfsteal_port"
+
+    if is_ufw_active; then
+        colorized_echo green "✅ UFW активен"
+        ufw status numbered 2>/dev/null | head -20
+    else
+        colorized_echo yellow "⚠️  UFW включён, но статус не определён"
+    fi
+}
+
+ufw_status() {
+    echo
+    colorized_echo cyan "🔥 UFW Firewall — статус"
+    echo -e "\033[38;5;8m$(printf '─%.0s' $(seq 1 50))\033[0m"
+    echo
+    if ! is_ufw_installed; then
+        colorized_echo yellow "⚠️  ufw не установлен"
+        return 1
+    fi
+    if is_ufw_active; then
+        colorized_echo green "✅ UFW активен"
+    else
+        colorized_echo yellow "⏹  UFW неактивен"
+    fi
+    echo
+    ufw status numbered 2>/dev/null
+}
+
+ufw_menu() {
+    while true; do
+        clear
+        echo -e "\033[1;37m🔥 UFW Firewall\033[0m"
+        echo -e "\033[38;5;8m$(printf '─%.0s' $(seq 1 55))\033[0m"
+        echo
+
+        if ! is_ufw_installed; then
+            printf "   \033[38;5;15m%-20s\033[0m \033[38;5;244m%s\033[0m\n" "UFW:" "не установлен"
+        elif is_ufw_active; then
+            printf "   \033[38;5;15m%-20s\033[0m \033[1;32m%s\033[0m\n" "UFW:" "активен ✅"
+        else
+            printf "   \033[38;5;15m%-20s\033[0m \033[38;5;244m%s\033[0m\n" "UFW:" "неактивен"
+        fi
+
+        echo
+        echo -e "\033[38;5;8m$(printf '─%.0s' $(seq 1 55))\033[0m"
+        echo -e "   \033[38;5;15m1)\033[0m 📊 Статус и правила"
+
+        if is_ufw_installed && is_ufw_active; then
+            echo -e "   \033[38;5;15m2)\033[0m ⏹️  Отключить UFW"
+        else
+            echo -e "   \033[38;5;15m2)\033[0m ▶️  Включить UFW"
+        fi
+
+        echo -e "   \033[38;5;15m3)\033[0m ⚙️  Перенастроить правила"
+        echo -e "   \033[38;5;15m4)\033[0m ➕ Разрешить порт"
+        echo -e "   \033[38;5;15m5)\033[0m ➖ Удалить правило"
+        echo -e "\033[38;5;8m$(printf '─%.0s' $(seq 1 55))\033[0m"
+        echo -e "\033[38;5;15m   0)\033[0m 🔙 Назад"
+        echo
+        read -p "$(echo -e "\033[1;37mВыберите пункт [0-5]:\033[0m ")" ufw_choice
+
+        case "$ufw_choice" in
+            1)
+                ufw_status
+                read -p "Press Enter to continue..."
+                ;;
+            2)
+                if is_ufw_installed && is_ufw_active; then
+                    colorized_echo yellow "⏹️  Отключаем UFW..."
+                    ufw disable
+                    colorized_echo green "✅ UFW отключён"
+                else
+                    if ! is_ufw_installed; then
+                        colorized_echo cyan "📦 Устанавливаем ufw..."
+                        install_ufw_pkg
+                    fi
+                    colorized_echo cyan "▶️  Включаем UFW..."
+                    ufw --force enable
+                    colorized_echo green "✅ UFW включён"
+                fi
+                read -p "Press Enter to continue..."
+                ;;
+            3)
+                configure_ufw_integration
+                read -p "Press Enter to continue..."
+                ;;
+            4)
+                echo
+                read -p "$(echo -e "   Порт/протокол (например \033[38;5;117m8080/tcp\033[0m или \033[38;5;117m443\033[0m): ")" allow_port
+                if [ -n "$allow_port" ]; then
+                    ufw allow "$allow_port"
+                    colorized_echo green "✅ Разрешено: $allow_port"
+                fi
+                read -p "Press Enter to continue..."
+                ;;
+            5)
+                echo
+                ufw status numbered 2>/dev/null
+                echo
+                read -p "$(echo -e "   Номер правила для удаления: ")" del_num
+                if [[ "$del_num" =~ ^[0-9]+$ ]]; then
+                    yes | ufw delete "$del_num" 2>/dev/null
+                    colorized_echo green "✅ Правило удалено"
+                fi
+                read -p "Press Enter to continue..."
+                ;;
+            0) break ;;
+            *)
+                echo -e "\033[1;31m❌ Неверный пункт!\033[0m"
+                sleep 1
+                ;;
+        esac
+    done
+}
+
 install_remnanode() {
 
     if ! check_system_requirements; then
@@ -2520,6 +2782,9 @@ install_command() {
 
     # Offer IPv6 disable
     configure_ipv6_integration
+
+    # Offer UFW firewall setup
+    configure_ufw_integration
 
     up_remnanode
 
@@ -5143,6 +5408,7 @@ usage() {
     printf "   \033[38;5;178m%-18s\033[0m %s\n" "torrent-blocker" "🚫 Xray Torrent Blocker (enable/disable)"
     printf "   \033[38;5;178m%-18s\033[0m %s\n" "net-opt" "🌐 Network Optimizations (BBR+CAKE / IPv6)"
     printf "   \033[38;5;178m%-18s\033[0m %s\n" "profile-config" "📋 Show Xray node profile config"
+    printf "   \033[38;5;178m%-18s\033[0m %s\n" "ufw" "🔥 UFW Firewall manager"
     echo
 
     echo -e "\033[1;37m📋 Information:\033[0m"
@@ -5417,6 +5683,7 @@ main_menu() {
         echo -e "   \033[38;5;15m19)\033[0m 🚫 Xray Torrent Blocker"
         echo -e "   \033[38;5;15m20)\033[0m 🌐 Network Optimizations (BBR / IPv6)"
         echo -e "   \033[38;5;15m21)\033[0m 📋 Show Xray Profile Config"
+        echo -e "   \033[38;5;15m22)\033[0m 🔥 UFW Firewall"
         echo
         echo -e "\033[38;5;8m$(printf '─%.0s' $(seq 1 55))\033[0m"
         echo -e "\033[38;5;15m   0)\033[0m 🚪 Exit to terminal"
@@ -5441,7 +5708,7 @@ main_menu() {
         
         echo -e "\033[38;5;8mRemnaNode CLI v$SCRIPT_VERSION by DigneZzZ • gig.ovh\033[0m"
         echo
-        read -p "$(echo -e "\033[1;37mSelect option [0-21]:\033[0m ")" choice
+        read -p "$(echo -e "\033[1;37mSelect option [0-22]:\033[0m ")" choice
 
         case "$choice" in
             1) install_command; read -p "Press Enter to continue..." ;;
@@ -5465,6 +5732,7 @@ main_menu() {
             19) torrent_blocker_menu ;;
             20) net_opt_menu ;;
             21) print_xray_profile_config; read -p "Press Enter to continue..." ;;
+            22) ufw_menu ;;
             0) clear; exit 0 ;;
             *) 
                 echo -e "\033[1;31m❌ Invalid option!\033[0m"
@@ -5500,6 +5768,7 @@ case "${COMMAND:-menu}" in
     torrent-blocker) torrent_blocker_menu ;;
     net-opt) net_opt_menu ;;
     profile-config) print_xray_profile_config ;;
+    ufw) ufw_menu ;;
     help|--help|-h) usage ;;
     version|--version|-v) show_version ;;
     menu) main_menu ;;
