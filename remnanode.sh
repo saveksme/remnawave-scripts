@@ -2071,8 +2071,7 @@ configure_ufw_integration() {
     echo -e "\033[38;5;8m$(printf '─%.0s' $(seq 1 55))\033[0m"
     echo
 
-    local ssh_port panel_ip open_xray_ans selfsteal_port caddy_port
-    caddy_port=$(get_caddy_https_port)
+    local ssh_port panel_ip open_xray_ans open_xray
 
     # SSH port
     read -p "$(printf "   \033[38;5;15m%-22s\033[0m [\033[38;5;117m22\033[0m]: " "SSH порт")" ssh_port
@@ -2091,17 +2090,6 @@ configure_ufw_integration() {
         open_xray="true"
     fi
 
-    # Selfsteal Caddy port (if detected and different from 443)
-    if check_caddy_selfsteal 2>/dev/null && [ "$caddy_port" != "443" ]; then
-        echo
-        read -p "$(printf "   \033[38;5;15m%-22s\033[0m [Y/n]: " "Открыть ${caddy_port}/tcp (Caddy selfsteal)")" open_caddy_ans
-        if [[ "$open_caddy_ans" =~ ^[Nn]$ ]]; then
-            selfsteal_port=""
-        else
-            selfsteal_port="$caddy_port"
-        fi
-    fi
-
     echo
     echo -e "\033[38;5;8m$(printf '─%.0s' $(seq 1 55))\033[0m"
     echo -e "\033[1;37m  📋 Итоговые правила UFW:\033[0m"
@@ -2114,9 +2102,6 @@ configure_ufw_integration() {
     fi
     if [ "$open_xray" = "true" ]; then
         printf "   \033[38;5;15m%-26s\033[0m \033[38;5;250m%s\033[0m\n" "Xray Reality:" "443/tcp → разрешить"
-    fi
-    if [ -n "$selfsteal_port" ]; then
-        printf "   \033[38;5;15m%-26s\033[0m \033[38;5;250m%s\033[0m\n" "Caddy selfsteal:" "${selfsteal_port}/tcp → разрешить"
     fi
     printf "   \033[38;5;15m%-26s\033[0m \033[38;5;250m%s\033[0m\n" "Остальное входящее:" "запретить"
     echo
@@ -2136,7 +2121,7 @@ configure_ufw_integration() {
     fi
 
     colorized_echo cyan "🔧 Применяем правила..."
-    apply_ufw_rules "$ssh_port" "$panel_ip" "$NODE_PORT" "$open_xray" "$selfsteal_port"
+    apply_ufw_rules "$ssh_port" "$panel_ip" "$NODE_PORT" "$open_xray" ""
 
     if is_ufw_active; then
         colorized_echo green "✅ UFW активен"
