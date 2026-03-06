@@ -1670,32 +1670,14 @@ tblocker_get_storage_dir() {
 }
 
 # Find the iptables chain where tblocker stores its blocks.
-# With has_rules=true  — returns chain only if it has DROP/REJECT rules (for listing)
-# With has_rules=false — returns chain if it exists at all (for adding rules)
 tblocker_detect_chain() {
-    local require_rules="${1:-true}"
     local name
+    # 1. Always check known tblocker chain names first (even if empty)
     for name in TBLOCKER_BLOCKED TBLOCKER tblocker TORRENT torrent-blocker; do
-        if [ "$require_rules" = "true" ]; then
-            if iptables -L "$name" -n 2>/dev/null | grep -qE "DROP|REJECT"; then
-                echo "$name"; return 0
-            fi
-        else
-            if iptables -L "$name" -n >/dev/null 2>&1; then
-                echo "$name"; return 0
-            fi
+        if iptables -L "$name" -n >/dev/null 2>&1; then
+            echo "$name"; return 0
         fi
     done
-    # Scan all chains for DROP rules that contain real source IPs
-    if [ "$require_rules" = "true" ]; then
-        local chain
-        while IFS= read -r chain; do
-            if iptables -L "$chain" -n 2>/dev/null | grep -E "DROP|REJECT" | \
-               grep -qE "([0-9]{1,3}\.){3}[0-9]{1,3}"; then
-                echo "$chain"; return 0
-            fi
-        done < <(iptables -L -n 2>/dev/null | grep "^Chain" | awk '{print $2}')
-    fi
     return 1
 }
 
@@ -1744,8 +1726,17 @@ tblocker_list_banned() {
     local chain
     chain=$(tblocker_detect_chain)
     if [ -n "$chain" ]; then
-        _tblocker_print_chain_rules "$chain"
-        found=true
+        local rule_count
+        rule_count=$(iptables -L "$chain" -n 2>/dev/null | grep -cE "DROP|REJECT" || echo 0)
+        if [ "$rule_count" -gt 0 ]; then
+            _tblocker_print_chain_rules "$chain"
+            found=true
+        else
+            printf "   \033[38;5;15m%-20s\033[0m \033[38;5;250m%s\033[0m \033[38;5;244m(цепочка: %s)\033[0m\n" \
+                "Заблокировано IP:" "0" "$chain"
+            colorized_echo gray "   Цепочка пуста — активных банов нет"
+            found=true
+        fi
     fi
 
     # Check blocked_ips.json in StorageDir
