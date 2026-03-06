@@ -1670,22 +1670,32 @@ tblocker_get_storage_dir() {
 }
 
 # Find the iptables chain where tblocker stores its blocks.
-# Outputs chain name, or empty string if not found.
+# With has_rules=true  — returns chain only if it has DROP/REJECT rules (for listing)
+# With has_rules=false — returns chain if it exists at all (for adding rules)
 tblocker_detect_chain() {
+    local require_rules="${1:-true}"
     local name
-    for name in TBLOCKER tblocker TORRENT torrent-blocker; do
-        if iptables -L "$name" -n 2>/dev/null | grep -qE "DROP|REJECT"; then
-            echo "$name"; return 0
+    for name in TBLOCKER_BLOCKED TBLOCKER tblocker TORRENT torrent-blocker; do
+        if [ "$require_rules" = "true" ]; then
+            if iptables -L "$name" -n 2>/dev/null | grep -qE "DROP|REJECT"; then
+                echo "$name"; return 0
+            fi
+        else
+            if iptables -L "$name" -n >/dev/null 2>&1; then
+                echo "$name"; return 0
+            fi
         fi
     done
     # Scan all chains for DROP rules that contain real source IPs
-    local chain
-    while IFS= read -r chain; do
-        if iptables -L "$chain" -n 2>/dev/null | grep -E "DROP|REJECT" | \
-           grep -qE "([0-9]{1,3}\.){3}[0-9]{1,3}"; then
-            echo "$chain"; return 0
-        fi
-    done < <(iptables -L -n 2>/dev/null | grep "^Chain" | awk '{print $2}')
+    if [ "$require_rules" = "true" ]; then
+        local chain
+        while IFS= read -r chain; do
+            if iptables -L "$chain" -n 2>/dev/null | grep -E "DROP|REJECT" | \
+               grep -qE "([0-9]{1,3}\.){3}[0-9]{1,3}"; then
+                echo "$chain"; return 0
+            fi
+        done < <(iptables -L -n 2>/dev/null | grep "^Chain" | awk '{print $2}')
+    fi
     return 1
 }
 
@@ -1738,21 +1748,25 @@ tblocker_list_banned() {
         found=true
     fi
 
-    # Check StorageDir for any state files with IPs
+    # Check blocked_ips.json in StorageDir
     if [ "$found" = false ]; then
         local storage_dir; storage_dir=$(tblocker_get_storage_dir)
-        local f
-        for f in "$storage_dir"/*.json "$storage_dir"/*.txt "$storage_dir"/*.yaml; do
-            [ -f "$f" ] || continue
+        local blocked_file="$storage_dir/blocked_ips.json"
+        if [ -f "$blocked_file" ] && [ "$(wc -c < "$blocked_file")" -gt 5 ]; then
             local file_ips
-            file_ips=$(grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' "$f" 2>/dev/null | grep -v "^127\.\|^0\.")
+            file_ips=$(grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' "$blocked_file" 2>/dev/null | grep -v "^127\.\|^0\.\|^::1")
             if [ -n "$file_ips" ]; then
-                colorized_echo white "📄 Из файла $(basename "$f"):"
+                local fcount; fcount=$(echo "$file_ips" | wc -l)
+                printf "   \033[38;5;15m%-20s\033[0m \033[1;33m%s\033[0m \033[38;5;244m(из blocked_ips.json)\033[0m\n" \
+                    "Заблокировано IP:" "$fcount"
+                echo
+                printf "   \033[38;5;244m%-6s  %-20s\033[0m\n" "№" "IP-адрес"
+                echo -e "   \033[38;5;8m$(printf '─%.0s' $(seq 1 30))\033[0m"
                 echo "$file_ips" | sort -u | nl -w6 | \
                     awk '{printf "   \033[38;5;15m%-6s\033[0m  \033[38;5;117m%s\033[0m\n", $1, $2}'
                 found=true
             fi
-        done
+        fi
     fi
 
     if [ "$found" = false ]; then
@@ -1787,17 +1801,8 @@ tblocker_ban_ip() {
         return
     fi
 
-    # iptables: use detected chain, fallback to INPUT
-    local chain; chain=$(tblocker_detect_chain)
-    # If no chain with rules yet, still try known names (chain might exist but be empty)
-    if [ -z "$chain" ]; then
-        local name
-        for name in TBLOCKER tblocker; do
-            if iptables -L "$name" -n 2>/dev/null; then
-                chain="$name"; break
-            fi
-        done
-    fi
+    # iptables: find chain (even if empty — for adding rules)
+    local chain; chain=$(tblocker_detect_chain false)
 
     if [ -n "$chain" ]; then
         if iptables -I "$chain" 1 -s "$ban_ip" -j DROP 2>/dev/null; then
