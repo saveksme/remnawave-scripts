@@ -1659,6 +1659,152 @@ torrent_blocker_logs() {
         colorized_echo yellow "   Логи недоступны"
 }
 
+tblocker_get_block_mode() {
+    grep "^BlockMode:" "$TBLOCKER_CONFIG" 2>/dev/null | awk '{print $2}' | tr -d '"' || echo "iptables"
+}
+
+tblocker_list_banned() {
+    echo
+    colorized_echo cyan "🚫 Заблокированные IP (tblocker)"
+    echo -e "\033[38;5;8m$(printf '─%.0s' $(seq 1 55))\033[0m"
+    echo
+
+    local mode found=false
+    mode=$(tblocker_get_block_mode)
+
+    if [ "$mode" = "iptables" ]; then
+        if iptables -L TBLOCKER -n 2>/dev/null | grep -q "DROP"; then
+            local count
+            count=$(iptables -L TBLOCKER -n 2>/dev/null | grep -c "DROP")
+            printf "   \033[38;5;15m%-20s\033[0m \033[1;33m%s\033[0m\n" "Заблокировано IP:" "$count"
+            echo
+            printf "   \033[38;5;244m%-6s  %-20s  %s\033[0m\n" "№" "IP-адрес" "Пакетов"
+            echo -e "   \033[38;5;8m$(printf '─%.0s' $(seq 1 42))\033[0m"
+            iptables -L TBLOCKER -n --line-numbers 2>/dev/null | grep "DROP" | \
+                awk '{printf "   \033[38;5;15m%-6s\033[0m  \033[38;5;117m%-20s\033[0m  \033[38;5;244m%s\033[0m\n", $1, $5, $2}'
+            found=true
+        elif iptables -L INPUT -n 2>/dev/null | grep -q "tblocker"; then
+            echo -e "   \033[38;5;8m$(printf '─%.0s' $(seq 1 42))\033[0m"
+            iptables -L INPUT -n --line-numbers 2>/dev/null | grep "tblocker"
+            found=true
+        else
+            colorized_echo gray "   Нет заблокированных IP в iptables"
+        fi
+    elif [ "$mode" = "nftables" ]; then
+        local ips
+        ips=$(nft list set inet tblocker blocked_ips 2>/dev/null | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}')
+        if [ -n "$ips" ]; then
+            echo "$ips" | nl -w6 -s'  ' | awk '{printf "   \033[38;5;15m%-6s\033[0m  \033[38;5;117m%s\033[0m\n", $1, $2}'
+            found=true
+        else
+            colorized_echo gray "   Нет заблокированных IP (nftables)"
+        fi
+    fi
+
+    [ "$found" = false ] && colorized_echo gray "   Режим блокировки: $mode"
+}
+
+tblocker_ban_ip() {
+    echo
+    colorized_echo cyan "🔒 Заблокировать IP вручную"
+    echo -e "\033[38;5;8m$(printf '─%.0s' $(seq 1 55))\033[0m"
+    echo
+    read -p "$(echo -e "   \033[38;5;15mIP-адрес\033[0m для блокировки: ")" ban_ip
+    ban_ip=$(echo "$ban_ip" | tr -d '[:space:]')
+
+    if [ -z "$ban_ip" ]; then
+        colorized_echo red "❌ IP не указан"; return 1
+    fi
+    if ! echo "$ban_ip" | grep -qE "^([0-9]{1,3}\.){3}[0-9]{1,3}(/[0-9]+)?$"; then
+        colorized_echo red "❌ Некорректный формат: $ban_ip"; return 1
+    fi
+
+    local mode
+    mode=$(tblocker_get_block_mode)
+
+    if [ "$mode" = "nftables" ]; then
+        if nft add element inet tblocker blocked_ips "{ $ban_ip }" 2>/dev/null; then
+            colorized_echo green "✅ IP $ban_ip заблокирован (nftables)"
+        else
+            colorized_echo red "❌ Ошибка блокировки (nftables)"
+        fi
+        return
+    fi
+
+    # iptables
+    if iptables -L TBLOCKER -n 2>/dev/null; then
+        if iptables -I TBLOCKER 1 -s "$ban_ip" -j DROP 2>/dev/null; then
+            colorized_echo green "✅ IP $ban_ip заблокирован (TBLOCKER chain)"
+        else
+            colorized_echo red "❌ Ошибка добавления в TBLOCKER chain"
+        fi
+    else
+        if iptables -I INPUT 1 -s "$ban_ip" -j DROP -m comment --comment "tblocker" 2>/dev/null; then
+            colorized_echo green "✅ IP $ban_ip заблокирован (INPUT chain)"
+        else
+            colorized_echo red "❌ Ошибка добавления правила iptables"
+        fi
+    fi
+}
+
+tblocker_unban_ip() {
+    echo
+    colorized_echo cyan "🔓 Разблокировать IP"
+    echo -e "\033[38;5;8m$(printf '─%.0s' $(seq 1 55))\033[0m"
+
+    local mode
+    mode=$(tblocker_get_block_mode)
+
+    if [ "$mode" = "nftables" ]; then
+        echo
+        read -p "$(echo -e "   \033[38;5;15mIP-адрес\033[0m для разблокировки: ")" unban_ip
+        unban_ip=$(echo "$unban_ip" | tr -d '[:space:]')
+        if nft delete element inet tblocker blocked_ips "{ $unban_ip }" 2>/dev/null; then
+            colorized_echo green "✅ IP $unban_ip разблокирован"
+        else
+            colorized_echo red "❌ IP $unban_ip не найден"
+        fi
+        return
+    fi
+
+    # iptables
+    if iptables -L TBLOCKER -n 2>/dev/null | grep -q "DROP"; then
+        echo
+        printf "   \033[38;5;244m%-6s  %-20s\033[0m\n" "№" "IP-адрес"
+        echo -e "   \033[38;5;8m$(printf '─%.0s' $(seq 1 30))\033[0m"
+        iptables -L TBLOCKER -n --line-numbers 2>/dev/null | grep "DROP" | \
+            awk '{printf "   \033[38;5;15m%-6s\033[0m  \033[38;5;117m%s\033[0m\n", $1, $5}'
+        echo
+        read -p "$(echo -e "   Введите \033[38;5;117m№ правила\033[0m или \033[38;5;117mIP\033[0m: ")" unban_input
+        unban_input=$(echo "$unban_input" | tr -d '[:space:]')
+        [ -z "$unban_input" ] && return
+
+        if echo "$unban_input" | grep -qE "^[0-9]+$"; then
+            if iptables -D TBLOCKER "$unban_input" 2>/dev/null; then
+                colorized_echo green "✅ Правило №$unban_input удалено"
+            else
+                colorized_echo red "❌ Не удалось удалить правило №$unban_input"
+            fi
+        else
+            if iptables -D TBLOCKER -s "$unban_input" -j DROP 2>/dev/null; then
+                colorized_echo green "✅ IP $unban_input разблокирован"
+            else
+                colorized_echo red "❌ IP $unban_input не найден"
+            fi
+        fi
+    else
+        echo
+        read -p "$(echo -e "   \033[38;5;15mIP-адрес\033[0m для разблокировки: ")" unban_ip
+        unban_ip=$(echo "$unban_ip" | tr -d '[:space:]')
+        if iptables -D INPUT -s "$unban_ip" -j DROP -m comment --comment "tblocker" 2>/dev/null || \
+           iptables -D INPUT -s "$unban_ip" -j DROP 2>/dev/null; then
+            colorized_echo green "✅ IP $unban_ip разблокирован"
+        else
+            colorized_echo red "❌ IP $unban_ip не найден в правилах"
+        fi
+    fi
+}
+
 torrent_blocker_menu() {
     while true; do
         clear
@@ -1696,16 +1842,19 @@ torrent_blocker_menu() {
                 echo -e "   \033[38;5;15m3)\033[0m ▶️  Запустить"
             fi
             echo -e "   \033[38;5;15m4)\033[0m ⚙️  Настроить параметры"
-            echo -e "   \033[38;5;15m5)\033[0m 🗑️  Удалить"
+            echo -e "   \033[38;5;15m5)\033[0m 🚫 Список забаненных IP"
+            echo -e "   \033[38;5;15m6)\033[0m 🔒 Заблокировать IP"
+            echo -e "   \033[38;5;15m7)\033[0m 🔓 Разблокировать IP"
+            echo -e "   \033[38;5;15m8)\033[0m 🗑️  Удалить"
         else
-            echo -e "   \033[38;5;244m   1-5) Недоступно (не установлен)\033[0m"
-            echo -e "   \033[38;5;15m6)\033[0m 📦 Установить tblocker"
+            echo -e "   \033[38;5;244m   1-8) Недоступно (не установлен)\033[0m"
+            echo -e "   \033[38;5;15m9)\033[0m 📦 Установить tblocker"
         fi
 
         echo -e "\033[38;5;8m$(printf '─%.0s' $(seq 1 55))\033[0m"
         echo -e "\033[38;5;15m   0)\033[0m 🔙 Назад"
         echo
-        read -p "$(echo -e "\033[1;37mВыберите пункт [0-6]:\033[0m ")" tb_choice
+        read -p "$(echo -e "\033[1;37mВыберите пункт [0-9]:\033[0m ")" tb_choice
 
         case "$tb_choice" in
             1)
@@ -1729,6 +1878,21 @@ torrent_blocker_menu() {
                 read -p "Press Enter to continue..."
                 ;;
             5)
+                if is_torrent_blocker_installed; then tblocker_list_banned
+                else colorized_echo yellow "⚠️  Torrent blocker не установлен"; fi
+                read -p "Press Enter to continue..."
+                ;;
+            6)
+                if is_torrent_blocker_installed; then tblocker_ban_ip
+                else colorized_echo yellow "⚠️  Torrent blocker не установлен"; fi
+                read -p "Press Enter to continue..."
+                ;;
+            7)
+                if is_torrent_blocker_installed; then tblocker_unban_ip
+                else colorized_echo yellow "⚠️  Torrent blocker не установлен"; fi
+                read -p "Press Enter to continue..."
+                ;;
+            8)
                 if is_torrent_blocker_installed; then
                     read -p "Удалить torrent blocker? [y/N]: " -r confirm_del
                     if [[ $confirm_del =~ ^[Yy]$ ]]; then
@@ -1740,7 +1904,7 @@ torrent_blocker_menu() {
                 fi
                 read -p "Press Enter to continue..."
                 ;;
-            6)
+            9)
                 if ! is_torrent_blocker_installed; then configure_torrent_blocker_integration
                 else colorized_echo yellow "⚠️  Torrent blocker уже установлен"; fi
                 read -p "Press Enter to continue..."
