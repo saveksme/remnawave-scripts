@@ -1615,6 +1615,241 @@ torrent_blocker_menu() {
     done
 }
 
+# =====================================
+# NETWORK OPTIMIZATIONS (BBR+CAKE / IPv6)
+# =====================================
+
+SYSCTL_BBR="/etc/sysctl.d/99-bbr-cake.conf"
+SYSCTL_IPV6="/etc/sysctl.d/99-disable-ipv6.conf"
+
+is_bbr_active() {
+    sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null | grep -q "^bbr$"
+}
+
+is_cake_active() {
+    sysctl -n net.core.default_qdisc 2>/dev/null | grep -q "^cake$"
+}
+
+is_ipv6_disabled() {
+    [ "$(sysctl -n net.ipv6.conf.all.disable_ipv6 2>/dev/null)" = "1" ]
+}
+
+enable_bbr_cake() {
+    # Load kernel modules
+    modprobe tcp_bbr 2>/dev/null || true
+    modprobe sch_cake 2>/dev/null || true
+
+    cat > "$SYSCTL_BBR" << 'EOF'
+net.core.default_qdisc=cake
+net.ipv4.tcp_congestion_control=bbr
+EOF
+    sysctl --system >/dev/null 2>&1
+
+    if is_bbr_active && is_cake_active; then
+        return 0
+    else
+        # CAKE might not be available on older kernels, fall back to fq
+        sed -i 's/^net.core.default_qdisc=cake/net.core.default_qdisc=fq/' "$SYSCTL_BBR"
+        sysctl --system >/dev/null 2>&1
+        return 0
+    fi
+}
+
+disable_bbr_cake() {
+    rm -f "$SYSCTL_BBR"
+    sysctl --system >/dev/null 2>&1
+}
+
+disable_ipv6() {
+    cat > "$SYSCTL_IPV6" << 'EOF'
+net.ipv6.conf.all.disable_ipv6 = 1
+net.ipv6.conf.default.disable_ipv6 = 1
+net.ipv6.conf.lo.disable_ipv6 = 1
+EOF
+    sysctl --system >/dev/null 2>&1
+}
+
+enable_ipv6() {
+    rm -f "$SYSCTL_IPV6"
+    sysctl --system >/dev/null 2>&1
+}
+
+configure_bbr_cake_integration() {
+    echo
+    colorized_echo cyan "⚡ BBR + CAKE — оптимизация TCP"
+    echo -e "\033[38;5;8m$(printf '─%.0s' $(seq 1 55))\033[0m"
+
+    if is_bbr_active; then
+        local qdisc
+        qdisc=$(sysctl -n net.core.default_qdisc 2>/dev/null)
+        colorized_echo green "✅ BBR уже активен (qdisc: $qdisc)"
+        return 0
+    fi
+
+    if [ "$FORCE_MODE" = "true" ]; then
+        colorized_echo gray "   Пропуск (автоматический режим)"
+        return 0
+    fi
+
+    colorized_echo gray "   BBR — алгоритм контроля перегрузки от Google"
+    colorized_echo gray "   CAKE — интеллектуальная очередь пакетов"
+    echo
+    read -p "Включить BBR + CAKE? [y/N]: " -r enable_bbr
+    if [[ ! $enable_bbr =~ ^[Yy]$ ]]; then
+        colorized_echo gray "   Пропускаем. Включить позже: remnanode net-opt"
+        return 0
+    fi
+
+    enable_bbr_cake
+    local qdisc
+    qdisc=$(sysctl -n net.core.default_qdisc 2>/dev/null)
+    colorized_echo green "✅ BBR активирован (qdisc: $qdisc)"
+}
+
+configure_ipv6_integration() {
+    echo
+    colorized_echo cyan "🔕 Отключение IPv6"
+    echo -e "\033[38;5;8m$(printf '─%.0s' $(seq 1 55))\033[0m"
+
+    if is_ipv6_disabled; then
+        colorized_echo green "✅ IPv6 уже отключён"
+        return 0
+    fi
+
+    if [ "$FORCE_MODE" = "true" ]; then
+        colorized_echo gray "   Пропуск (автоматический режим)"
+        return 0
+    fi
+
+    colorized_echo gray "   Отключает IPv6 через sysctl (применяется сразу, без перезагрузки)"
+    echo
+    read -p "Отключить IPv6? [y/N]: " -r dis_ipv6
+    if [[ ! $dis_ipv6 =~ ^[Yy]$ ]]; then
+        colorized_echo gray "   Пропускаем. Управлять позже: remnanode net-opt"
+        return 0
+    fi
+
+    disable_ipv6
+    colorized_echo green "✅ IPv6 отключён"
+}
+
+net_opt_status() {
+    echo
+    colorized_echo cyan "🌐 Network Optimizations Status"
+    echo -e "\033[38;5;8m$(printf '─%.0s' $(seq 1 50))\033[0m"
+    echo
+
+    # BBR
+    local bbr_status qdisc
+    qdisc=$(sysctl -n net.core.default_qdisc 2>/dev/null || echo "unknown")
+    if is_bbr_active; then
+        printf "   \033[38;5;15m%-20s\033[0m \033[1;32m%s\033[0m\n" "BBR:" "активен ✅"
+    else
+        local cur_cc
+        cur_cc=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo "unknown")
+        printf "   \033[38;5;15m%-20s\033[0m \033[38;5;244m%s\033[0m\n" "BBR:" "неактивен (текущий: $cur_cc)"
+    fi
+    printf "   \033[38;5;15m%-20s\033[0m \033[38;5;117m%s\033[0m\n" "Qdisc:" "$qdisc"
+
+    echo
+
+    # IPv6
+    if is_ipv6_disabled; then
+        printf "   \033[38;5;15m%-20s\033[0m \033[1;32m%s\033[0m\n" "IPv6:" "отключён ✅"
+    else
+        printf "   \033[38;5;15m%-20s\033[0m \033[38;5;244m%s\033[0m\n" "IPv6:" "активен"
+    fi
+
+    echo
+    colorized_echo white "⚙️  Файлы конфигурации:"
+    [ -f "$SYSCTL_BBR" ]  && printf "   \033[38;5;244m%s\033[0m\n" "$SYSCTL_BBR"  || printf "   \033[38;5;244m%s (не существует)\033[0m\n" "$SYSCTL_BBR"
+    [ -f "$SYSCTL_IPV6" ] && printf "   \033[38;5;244m%s\033[0m\n" "$SYSCTL_IPV6" || printf "   \033[38;5;244m%s (не существует)\033[0m\n" "$SYSCTL_IPV6"
+}
+
+net_opt_menu() {
+    while true; do
+        clear
+        echo -e "\033[1;37m🌐 Network Optimizations\033[0m"
+        echo -e "\033[38;5;8m$(printf '─%.0s' $(seq 1 55))\033[0m"
+        echo
+
+        # BBR status
+        local qdisc
+        qdisc=$(sysctl -n net.core.default_qdisc 2>/dev/null || echo "?")
+        if is_bbr_active; then
+            printf "   \033[38;5;15m%-20s\033[0m \033[1;32m%s\033[0m \033[38;5;244m(qdisc: %s)\033[0m\n" "BBR + CAKE:" "активен ✅" "$qdisc"
+        else
+            printf "   \033[38;5;15m%-20s\033[0m \033[38;5;244m%s\033[0m\n" "BBR + CAKE:" "неактивен"
+        fi
+
+        # IPv6 status
+        if is_ipv6_disabled; then
+            printf "   \033[38;5;15m%-20s\033[0m \033[1;32m%s\033[0m\n" "IPv6:" "отключён ✅"
+        else
+            printf "   \033[38;5;15m%-20s\033[0m \033[38;5;244m%s\033[0m\n" "IPv6:" "активен"
+        fi
+
+        echo
+        echo -e "\033[38;5;8m$(printf '─%.0s' $(seq 1 55))\033[0m"
+        echo -e "   \033[38;5;15m1)\033[0m 📊 Статус"
+
+        if is_bbr_active; then
+            echo -e "   \033[38;5;15m2)\033[0m ⏹️  Отключить BBR + CAKE"
+        else
+            echo -e "   \033[38;5;15m2)\033[0m ⚡ Включить BBR + CAKE"
+        fi
+
+        if is_ipv6_disabled; then
+            echo -e "   \033[38;5;15m3)\033[0m ▶️  Включить IPv6"
+        else
+            echo -e "   \033[38;5;15m3)\033[0m 🔕 Отключить IPv6"
+        fi
+
+        echo -e "\033[38;5;8m$(printf '─%.0s' $(seq 1 55))\033[0m"
+        echo -e "\033[38;5;15m   0)\033[0m 🔙 Назад"
+        echo
+        read -p "$(echo -e "\033[1;37mВыберите пункт [0-3]:\033[0m ")" no_choice
+
+        case "$no_choice" in
+            1)
+                net_opt_status
+                read -p "Press Enter to continue..."
+                ;;
+            2)
+                if is_bbr_active; then
+                    colorized_echo yellow "⏹️  Отключаем BBR + CAKE..."
+                    disable_bbr_cake
+                    colorized_echo green "✅ BBR + CAKE отключены (вступит в силу после перезагрузки)"
+                else
+                    colorized_echo cyan "⚡ Включаем BBR + CAKE..."
+                    enable_bbr_cake
+                    local qdisc2
+                    qdisc2=$(sysctl -n net.core.default_qdisc 2>/dev/null)
+                    colorized_echo green "✅ BBR активирован (qdisc: $qdisc2)"
+                fi
+                read -p "Press Enter to continue..."
+                ;;
+            3)
+                if is_ipv6_disabled; then
+                    colorized_echo cyan "▶️  Включаем IPv6..."
+                    enable_ipv6
+                    colorized_echo green "✅ IPv6 включён (вступит в силу после перезагрузки)"
+                else
+                    colorized_echo yellow "🔕 Отключаем IPv6..."
+                    disable_ipv6
+                    colorized_echo green "✅ IPv6 отключён"
+                fi
+                read -p "Press Enter to continue..."
+                ;;
+            0) break ;;
+            *)
+                echo -e "\033[1;31m❌ Неверный пункт!\033[0m"
+                sleep 1
+                ;;
+        esac
+    done
+}
+
 install_remnanode() {
 
     if ! check_system_requirements; then
@@ -2140,6 +2375,12 @@ install_command() {
 
     # Offer torrent blocker installation
     configure_torrent_blocker_integration
+
+    # Offer BBR + CAKE
+    configure_bbr_cake_integration
+
+    # Offer IPv6 disable
+    configure_ipv6_integration
 
     up_remnanode
     follow_remnanode_logs
@@ -4756,6 +4997,7 @@ usage() {
     printf "   \033[38;5;178m%-18s\033[0m %s\n" "auto-restart" "⏰ Configure scheduled auto-restart"
     printf "   \033[38;5;178m%-18s\033[0m %s\n" "fail2ban" "🛡️  Fail2ban manager (ban/unban/status)"
     printf "   \033[38;5;178m%-18s\033[0m %s\n" "torrent-blocker" "🚫 Xray Torrent Blocker (enable/disable)"
+    printf "   \033[38;5;178m%-18s\033[0m %s\n" "net-opt" "🌐 Network Optimizations (BBR+CAKE / IPv6)"
     echo
 
     echo -e "\033[1;37m📋 Information:\033[0m"
@@ -5028,6 +5270,7 @@ main_menu() {
         echo -e "   \033[38;5;15m17)\033[0m ⏰ Auto-restart schedule"
         echo -e "   \033[38;5;15m18)\033[0m 🛡️  Fail2ban manager"
         echo -e "   \033[38;5;15m19)\033[0m 🚫 Xray Torrent Blocker"
+        echo -e "   \033[38;5;15m20)\033[0m 🌐 Network Optimizations (BBR / IPv6)"
         echo
         echo -e "\033[38;5;8m$(printf '─%.0s' $(seq 1 55))\033[0m"
         echo -e "\033[38;5;15m   0)\033[0m 🚪 Exit to terminal"
@@ -5052,7 +5295,7 @@ main_menu() {
         
         echo -e "\033[38;5;8mRemnaNode CLI v$SCRIPT_VERSION by DigneZzZ • gig.ovh\033[0m"
         echo
-        read -p "$(echo -e "\033[1;37mSelect option [0-19]:\033[0m ")" choice
+        read -p "$(echo -e "\033[1;37mSelect option [0-20]:\033[0m ")" choice
 
         case "$choice" in
             1) install_command; read -p "Press Enter to continue..." ;;
@@ -5074,6 +5317,7 @@ main_menu() {
             17) autorestart_menu ;;
             18) fail2ban_menu ;;
             19) torrent_blocker_menu ;;
+            20) net_opt_menu ;;
             0) clear; exit 0 ;;
             *) 
                 echo -e "\033[1;31m❌ Invalid option!\033[0m"
@@ -5107,6 +5351,7 @@ case "${COMMAND:-menu}" in
     auto-restart) autorestart_command ;;
     fail2ban) fail2ban_menu ;;
     torrent-blocker) torrent_blocker_menu ;;
+    net-opt) net_opt_menu ;;
     help|--help|-h) usage ;;
     version|--version|-v) show_version ;;
     menu) main_menu ;;
