@@ -766,12 +766,48 @@ install_selfsteal() {
     fi
 }
 
+# Detect actual HTTPS port of caddy-selfsteal
+get_caddy_https_port() {
+    local port
+    # 1. Try .env in /opt/caddy
+    port=$(grep -E "^HTTPS_PORT=" /opt/caddy/.env 2>/dev/null | cut -d= -f2 | tr -d '[:space:]')
+    [ -n "$port" ] && { echo "$port"; return; }
+
+    # 2. Try docker inspect port bindings (skip port 80)
+    port=$(docker inspect "$CADDY_SELFSTEAL_CONTAINER" \
+        --format='{{range $p,$b := .NetworkSettings.Ports}}{{if $b}}{{(index $b 0).HostPort}} {{$p}}{{"\n"}}{{end}}{{end}}' \
+        2>/dev/null | grep -v "^80[[:space:]]" | awk 'NR==1{print $1}')
+    [ -n "$port" ] && { echo "$port"; return; }
+
+    # 3. Fallback
+    echo "443"
+}
+
+# Detect domain of caddy-selfsteal
+get_caddy_domain() {
+    local domain
+    # 1. Try SELF_STEAL_DOMAIN from .env
+    domain=$(grep -E "^SELF_STEAL_DOMAIN=" /opt/caddy/.env 2>/dev/null | cut -d= -f2 | tr -d '[:space:]')
+    [ -n "$domain" ] && { echo "$domain"; return; }
+
+    # 2. Try to parse domain from Caddyfile
+    domain=$(grep -oE '^[a-zA-Z0-9._-]+\s*\{' /opt/caddy/Caddyfile 2>/dev/null | head -1 | tr -d ' {')
+    [ -n "$domain" ] && { echo "$domain"; return; }
+
+    # 3. Fallback
+    echo "<your-domain>"
+}
+
 # Print Xray Reality config hint for Caddy (TCP-based)
 print_caddy_reality_hint() {
+    local port domain
+    port=$(get_caddy_https_port)
+    domain=$(get_caddy_domain)
     colorized_echo cyan "📋 Xray Reality Configuration (Caddy / TCP):"
-    colorized_echo white "   \"dest\": \"127.0.0.1:443\","
-    colorized_echo white "   \"serverNames\": [\"<your-domain>\"]"
-    colorized_echo gray "   (Caddy listens on 127.0.0.1:443 — no unix socket needed)"
+    colorized_echo white "   \"dest\": \"127.0.0.1:${port}\","
+    colorized_echo white "   \"xver\": 0,"
+    colorized_echo white "   \"serverNames\": [\"${domain}\"]"
+    colorized_echo gray "   (Caddy listens on 127.0.0.1:${port})"
 }
 
 # Configure selfsteal integration after installation
@@ -841,6 +877,383 @@ enable_socket_command() {
             fi
         fi
     fi
+}
+
+# =====================================
+# FAIL2BAN INTEGRATION
+# =====================================
+
+is_fail2ban_installed() {
+    command -v fail2ban-client >/dev/null 2>&1
+}
+
+is_fail2ban_running() {
+    systemctl is-active --quiet fail2ban 2>/dev/null
+}
+
+install_fail2ban_pkg() {
+    if command -v apt-get >/dev/null 2>&1; then
+        apt-get install -y fail2ban >/dev/null 2>&1
+    elif command -v dnf >/dev/null 2>&1; then
+        dnf install -y fail2ban >/dev/null 2>&1
+    elif command -v yum >/dev/null 2>&1; then
+        yum install -y fail2ban >/dev/null 2>&1
+    else
+        colorized_echo red "❌ Не удалось определить пакетный менеджер. Установите fail2ban вручную."
+        return 1
+    fi
+}
+
+write_fail2ban_config() {
+    local bantime=${1:-3600}
+    local findtime=${2:-600}
+    local maxretry=${3:-5}
+
+    cat > /etc/fail2ban/jail.local << EOF
+[DEFAULT]
+bantime  = ${bantime}
+findtime = ${findtime}
+maxretry = ${maxretry}
+backend  = auto
+
+[sshd]
+enabled  = true
+port     = ssh
+logpath  = %(sshd_log)s
+EOF
+
+    if check_caddy_selfsteal 2>/dev/null; then
+        cat >> /etc/fail2ban/jail.local << EOF
+
+[caddy-auth]
+enabled  = true
+port     = http,https
+logpath  = /var/log/caddy/*.log
+maxretry = 10
+EOF
+    fi
+}
+
+configure_fail2ban_integration() {
+    echo
+    colorized_echo cyan "🛡️  Fail2ban — защита сервера от брутфорса"
+    echo -e "\033[38;5;8m$(printf '─%.0s' $(seq 1 55))\033[0m"
+
+    if is_fail2ban_installed; then
+        colorized_echo green "✅ Fail2ban уже установлен"
+        if ! is_fail2ban_running; then
+            colorized_echo yellow "   Сервис не запущен, запускаем..."
+            systemctl enable fail2ban >/dev/null 2>&1
+            systemctl start fail2ban >/dev/null 2>&1
+        else
+            colorized_echo green "   Сервис активен"
+        fi
+        return 0
+    fi
+
+    if [ "$FORCE_MODE" = "true" ]; then
+        colorized_echo gray "   Пропуск установки fail2ban (автоматический режим)"
+        return 0
+    fi
+
+    colorized_echo gray "   Защищает SSH и сервисы от атак перебором паролей"
+    echo
+    read -p "Установить fail2ban? [y/N]: " -r install_f2b
+    if [[ ! $install_f2b =~ ^[Yy]$ ]]; then
+        colorized_echo gray "   Пропускаем. Установить позже: remnanode fail2ban"
+        return 0
+    fi
+
+    echo
+    colorized_echo cyan "⚙️  Параметры (Enter = значение по умолчанию):"
+    echo
+
+    local bantime findtime maxretry
+    read -p "$(echo -e "   \033[38;5;15mBan time\033[0m   — время бана в секундах  [\033[38;5;117m3600\033[0m]: ")" bantime
+    bantime=${bantime:-3600}
+
+    read -p "$(echo -e "   \033[38;5;15mFind time\033[0m  — окно поиска в секундах [\033[38;5;117m600\033[0m]: ")" findtime
+    findtime=${findtime:-600}
+
+    read -p "$(echo -e "   \033[38;5;15mMax retry\033[0m  — попыток до бана        [\033[38;5;117m5\033[0m]: ")" maxretry
+    maxretry=${maxretry:-5}
+
+    echo
+    colorized_echo cyan "📦 Устанавливаем fail2ban..."
+    if ! install_fail2ban_pkg; then
+        colorized_echo red "❌ Ошибка установки fail2ban"
+        return 1
+    fi
+
+    colorized_echo cyan "⚙️  Записываем конфигурацию..."
+    write_fail2ban_config "$bantime" "$findtime" "$maxretry"
+
+    systemctl enable fail2ban >/dev/null 2>&1
+    systemctl restart fail2ban >/dev/null 2>&1
+    sleep 1
+
+    if is_fail2ban_running; then
+        colorized_echo green "✅ Fail2ban установлен и запущен"
+        colorized_echo gray "   bantime=${bantime}s  findtime=${findtime}s  maxretry=${maxretry}"
+    else
+        colorized_echo yellow "⚠️  Fail2ban установлен, но сервис не запустился"
+        colorized_echo gray "   Проверьте: systemctl status fail2ban"
+    fi
+}
+
+fail2ban_status_command() {
+    echo
+    colorized_echo cyan "🛡️  Fail2ban Status"
+    echo -e "\033[38;5;8m$(printf '─%.0s' $(seq 1 50))\033[0m"
+    echo
+
+    if ! is_fail2ban_installed; then
+        colorized_echo yellow "⚠️  Fail2ban не установлен"
+        colorized_echo gray "   Установить: remnanode fail2ban"
+        return 1
+    fi
+
+    if is_fail2ban_running; then
+        printf "   \033[38;5;15m%-14s\033[0m \033[1;32m%s\033[0m\n" "Сервис:" "запущен ✅"
+    else
+        printf "   \033[38;5;15m%-14s\033[0m \033[1;31m%s\033[0m\n" "Сервис:" "остановлен ❌"
+    fi
+    echo
+    colorized_echo white "📋 Jail'ы:"
+    fail2ban-client status 2>/dev/null || colorized_echo yellow "   Не удалось получить статус"
+}
+
+fail2ban_list_banned() {
+    echo
+    colorized_echo cyan "🚫 Заблокированные IP-адреса"
+    echo -e "\033[38;5;8m$(printf '─%.0s' $(seq 1 50))\033[0m"
+    echo
+
+    if ! is_fail2ban_installed || ! is_fail2ban_running; then
+        colorized_echo yellow "⚠️  Fail2ban не запущен"
+        return 1
+    fi
+
+    local jails
+    jails=$(fail2ban-client status 2>/dev/null | grep "Jail list:" | sed 's/.*Jail list:\s*//' | tr ',' ' ')
+
+    if [ -z "$jails" ]; then
+        colorized_echo gray "   Нет активных jail'ов"
+        return 0
+    fi
+
+    local found_any=false
+    for jail in $jails; do
+        jail=$(echo "$jail" | tr -d '[:space:]')
+        [ -z "$jail" ] && continue
+        local banned
+        banned=$(fail2ban-client status "$jail" 2>/dev/null | grep "Banned IP list:" | sed 's/.*Banned IP list:\s*//')
+        if [ -n "$banned" ]; then
+            colorized_echo yellow "   [$jail]:"
+            for ip in $banned; do
+                echo -e "      \033[38;5;196m$ip\033[0m"
+            done
+            found_any=true
+        fi
+    done
+
+    if [ "$found_any" = false ]; then
+        colorized_echo green "   Нет заблокированных IP 🎉"
+    fi
+}
+
+fail2ban_unban() {
+    echo
+    colorized_echo cyan "🔓 Разблокировать IP"
+    echo -e "\033[38;5;8m$(printf '─%.0s' $(seq 1 50))\033[0m"
+    echo
+
+    if ! is_fail2ban_installed || ! is_fail2ban_running; then
+        colorized_echo yellow "⚠️  Fail2ban не запущен"
+        return 1
+    fi
+
+    fail2ban_list_banned
+    echo
+    read -p "$(echo -e "\033[38;5;15mВведите IP для разблокировки:\033[0m ")" unban_ip
+    if [ -z "$unban_ip" ]; then
+        colorized_echo yellow "   Отмена"
+        return 0
+    fi
+
+    local jails unbanned=false
+    jails=$(fail2ban-client status 2>/dev/null | grep "Jail list:" | sed 's/.*Jail list:\s*//' | tr ',' ' ')
+    for jail in $jails; do
+        jail=$(echo "$jail" | tr -d '[:space:]')
+        [ -z "$jail" ] && continue
+        if fail2ban-client set "$jail" unbanip "$unban_ip" >/dev/null 2>&1; then
+            colorized_echo green "✅ IP $unban_ip разблокирован в [$jail]"
+            unbanned=true
+        fi
+    done
+
+    if [ "$unbanned" = false ]; then
+        colorized_echo yellow "   IP $unban_ip не найден среди заблокированных"
+    fi
+}
+
+fail2ban_logs() {
+    echo
+    colorized_echo cyan "📋 Fail2ban Logs (последние 50 строк)"
+    echo -e "\033[38;5;8m$(printf '─%.0s' $(seq 1 50))\033[0m"
+    echo
+    if [ -f "/var/log/fail2ban.log" ]; then
+        tail -50 /var/log/fail2ban.log
+    else
+        journalctl -u fail2ban --no-pager -n 50 2>/dev/null || colorized_echo yellow "   Логи недоступны"
+    fi
+}
+
+fail2ban_toggle() {
+    if is_fail2ban_running; then
+        colorized_echo yellow "⏹️  Останавливаем fail2ban..."
+        systemctl stop fail2ban
+        systemctl disable fail2ban >/dev/null 2>&1
+        colorized_echo green "✅ Fail2ban остановлен и убран из автозапуска"
+    else
+        colorized_echo cyan "▶️  Запускаем fail2ban..."
+        systemctl enable fail2ban >/dev/null 2>&1
+        systemctl start fail2ban
+        sleep 1
+        if is_fail2ban_running; then
+            colorized_echo green "✅ Fail2ban запущен"
+        else
+            colorized_echo red "❌ Не удалось запустить. Проверьте: systemctl status fail2ban"
+        fi
+    fi
+}
+
+fail2ban_configure() {
+    echo
+    colorized_echo cyan "⚙️  Настройка параметров fail2ban"
+    echo -e "\033[38;5;8m$(printf '─%.0s' $(seq 1 50))\033[0m"
+    echo
+
+    local cur_bantime cur_findtime cur_maxretry
+    cur_bantime=$(grep -E "^bantime\s*=" /etc/fail2ban/jail.local 2>/dev/null | awk -F= '{print $2}' | tr -d ' ' | head -1)
+    cur_findtime=$(grep -E "^findtime\s*=" /etc/fail2ban/jail.local 2>/dev/null | awk -F= '{print $2}' | tr -d ' ' | head -1)
+    cur_maxretry=$(grep -E "^maxretry\s*=" /etc/fail2ban/jail.local 2>/dev/null | awk -F= '{print $2}' | tr -d ' ' | head -1)
+    cur_bantime=${cur_bantime:-3600}
+    cur_findtime=${cur_findtime:-600}
+    cur_maxretry=${cur_maxretry:-5}
+
+    colorized_echo white "Текущие значения:"
+    printf "   \033[38;5;15m%-12s\033[0m \033[38;5;117m%s сек\033[0m\n" "bantime:" "$cur_bantime"
+    printf "   \033[38;5;15m%-12s\033[0m \033[38;5;117m%s сек\033[0m\n" "findtime:" "$cur_findtime"
+    printf "   \033[38;5;15m%-12s\033[0m \033[38;5;117m%s попыток\033[0m\n" "maxretry:" "$cur_maxretry"
+    echo
+
+    local bantime findtime maxretry
+    read -p "$(echo -e "   Ban time   [${cur_bantime}]: ")" bantime
+    bantime=${bantime:-$cur_bantime}
+    read -p "$(echo -e "   Find time  [${cur_findtime}]: ")" findtime
+    findtime=${findtime:-$cur_findtime}
+    read -p "$(echo -e "   Max retry  [${cur_maxretry}]: ")" maxretry
+    maxretry=${maxretry:-$cur_maxretry}
+
+    echo
+    write_fail2ban_config "$bantime" "$findtime" "$maxretry"
+    systemctl reload fail2ban 2>/dev/null || systemctl restart fail2ban 2>/dev/null
+    colorized_echo green "✅ Конфигурация обновлена и применена"
+}
+
+fail2ban_menu() {
+    while true; do
+        clear
+        echo -e "\033[1;37m🛡️  Fail2ban Manager\033[0m"
+        echo -e "\033[38;5;8m$(printf '─%.0s' $(seq 1 55))\033[0m"
+        echo
+
+        if is_fail2ban_installed; then
+            if is_fail2ban_running; then
+                printf "   \033[38;5;15m%-16s\033[0m \033[1;32m%s\033[0m\n" "Fail2ban:" "установлен, запущен ✅"
+                local jail_count
+                jail_count=$(fail2ban-client status 2>/dev/null | grep "Number of jail:" | awk '{print $NF}' || echo "?")
+                printf "   \033[38;5;15m%-16s\033[0m \033[38;5;117m%s\033[0m\n" "Jail'ов:" "$jail_count"
+            else
+                printf "   \033[38;5;15m%-16s\033[0m \033[1;33m%s\033[0m\n" "Fail2ban:" "установлен, остановлен ⚠️"
+            fi
+            local cur_bantime cur_maxretry
+            cur_bantime=$(grep -E "^bantime\s*=" /etc/fail2ban/jail.local 2>/dev/null | awk -F= '{print $2}' | tr -d ' ' | head -1)
+            cur_maxretry=$(grep -E "^maxretry\s*=" /etc/fail2ban/jail.local 2>/dev/null | awk -F= '{print $2}' | tr -d ' ' | head -1)
+            [ -n "$cur_bantime" ] && printf "   \033[38;5;15m%-16s\033[0m \033[38;5;244m%s сек\033[0m\n" "Ban time:" "$cur_bantime"
+            [ -n "$cur_maxretry" ] && printf "   \033[38;5;15m%-16s\033[0m \033[38;5;244m%s попыток\033[0m\n" "Max retry:" "$cur_maxretry"
+        else
+            printf "   \033[38;5;15m%-16s\033[0m \033[38;5;244m%s\033[0m\n" "Fail2ban:" "не установлен"
+        fi
+
+        echo
+        echo -e "\033[38;5;8m$(printf '─%.0s' $(seq 1 55))\033[0m"
+
+        if is_fail2ban_installed; then
+            echo -e "   \033[38;5;15m1)\033[0m 📊 Статус и jail'ы"
+            echo -e "   \033[38;5;15m2)\033[0m 🚫 Заблокированные IP"
+            echo -e "   \033[38;5;15m3)\033[0m 🔓 Разблокировать IP"
+            echo -e "   \033[38;5;15m4)\033[0m 📋 Логи fail2ban"
+            if is_fail2ban_running; then
+                echo -e "   \033[38;5;15m5)\033[0m ⏹️  Остановить fail2ban"
+            else
+                echo -e "   \033[38;5;15m5)\033[0m ▶️  Запустить fail2ban"
+            fi
+            echo -e "   \033[38;5;15m6)\033[0m ⚙️  Настроить параметры"
+        else
+            echo -e "   \033[38;5;244m   1-6) Недоступно (не установлен)\033[0m"
+            echo -e "   \033[38;5;15m7)\033[0m 📦 Установить fail2ban"
+        fi
+
+        echo -e "\033[38;5;8m$(printf '─%.0s' $(seq 1 55))\033[0m"
+        echo -e "\033[38;5;15m   0)\033[0m 🔙 Назад"
+        echo
+        read -p "$(echo -e "\033[1;37mВыберите пункт [0-7]:\033[0m ")" f2b_choice
+
+        case "$f2b_choice" in
+            1)
+                if is_fail2ban_installed; then fail2ban_status_command
+                else colorized_echo yellow "⚠️  Fail2ban не установлен"; fi
+                read -p "Press Enter to continue..."
+                ;;
+            2)
+                if is_fail2ban_installed; then fail2ban_list_banned
+                else colorized_echo yellow "⚠️  Fail2ban не установлен"; fi
+                read -p "Press Enter to continue..."
+                ;;
+            3)
+                if is_fail2ban_installed; then fail2ban_unban
+                else colorized_echo yellow "⚠️  Fail2ban не установлен"; fi
+                read -p "Press Enter to continue..."
+                ;;
+            4)
+                if is_fail2ban_installed; then fail2ban_logs
+                else colorized_echo yellow "⚠️  Fail2ban не установлен"; fi
+                read -p "Press Enter to continue..."
+                ;;
+            5)
+                if is_fail2ban_installed; then fail2ban_toggle
+                else colorized_echo yellow "⚠️  Fail2ban не установлен"; fi
+                read -p "Press Enter to continue..."
+                ;;
+            6)
+                if is_fail2ban_installed; then fail2ban_configure
+                else colorized_echo yellow "⚠️  Fail2ban не установлен"; fi
+                read -p "Press Enter to continue..."
+                ;;
+            7)
+                if ! is_fail2ban_installed; then configure_fail2ban_integration
+                else colorized_echo yellow "⚠️  Fail2ban уже установлен"; fi
+                read -p "Press Enter to continue..."
+                ;;
+            0) break ;;
+            *)
+                echo -e "\033[1;31m❌ Неверный пункт!\033[0m"
+                sleep 1
+                ;;
+        esac
+    done
 }
 
 install_remnanode() {
@@ -1362,7 +1775,10 @@ install_command() {
 
     # Check for selfsteal socket and enable volume if needed
     configure_selfsteal_integration
-    
+
+    # Offer fail2ban installation
+    configure_fail2ban_integration
+
     up_remnanode
     follow_remnanode_logs
 
@@ -3976,6 +4392,7 @@ usage() {
     printf "   \033[38;5;178m%-18s\033[0m %s\n" "ports" "🔌 Show ports configuration"
     printf "   \033[38;5;178m%-18s\033[0m %s\n" "enable-socket" "🔗 Enable selfsteal socket access"
     printf "   \033[38;5;178m%-18s\033[0m %s\n" "auto-restart" "⏰ Configure scheduled auto-restart"
+    printf "   \033[38;5;178m%-18s\033[0m %s\n" "fail2ban" "🛡️  Fail2ban manager (ban/unban/status)"
     echo
 
     echo -e "\033[1;37m📋 Information:\033[0m"
@@ -4246,11 +4663,12 @@ main_menu() {
         echo -e "   \033[38;5;15m15)\033[0m 🔌 Show ports configuration"
         echo -e "   \033[38;5;15m16)\033[0m 🗂️  Setup log rotation"
         echo -e "   \033[38;5;15m17)\033[0m ⏰ Auto-restart schedule"
+        echo -e "   \033[38;5;15m18)\033[0m 🛡️  Fail2ban manager"
         echo
         echo -e "\033[38;5;8m$(printf '─%.0s' $(seq 1 55))\033[0m"
         echo -e "\033[38;5;15m   0)\033[0m 🚪 Exit to terminal"
         echo
-        
+
         # Показываем подсказки в зависимости от состояния
         case "$menu_status" in
             "Not installed")
@@ -4270,7 +4688,7 @@ main_menu() {
         
         echo -e "\033[38;5;8mRemnaNode CLI v$SCRIPT_VERSION by DigneZzZ • gig.ovh\033[0m"
         echo
-        read -p "$(echo -e "\033[1;37mSelect option [0-17]:\033[0m ")" choice
+        read -p "$(echo -e "\033[1;37mSelect option [0-18]:\033[0m ")" choice
 
         case "$choice" in
             1) install_command; read -p "Press Enter to continue..." ;;
@@ -4290,6 +4708,7 @@ main_menu() {
             15) ports_command; read -p "Press Enter to continue..." ;;
             16) setup_log_rotation; read -p "Press Enter to continue..." ;;
             17) autorestart_menu ;;
+            18) fail2ban_menu ;;
             0) clear; exit 0 ;;
             *) 
                 echo -e "\033[1;31m❌ Invalid option!\033[0m"
@@ -4321,6 +4740,7 @@ case "${COMMAND:-menu}" in
     setup-logs) setup_log_rotation ;;
     enable-socket) enable_socket_command ;;
     auto-restart) autorestart_command ;;
+    fail2ban) fail2ban_menu ;;
     help|--help|-h) usage ;;
     version|--version|-v) show_version ;;
     menu) main_menu ;;
