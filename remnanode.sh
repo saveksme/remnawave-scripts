@@ -23,7 +23,7 @@ SCRIPT_URL="https://raw.githubusercontent.com/DigneZzZ/remnawave-scripts/main/re
 # ============================================
 FORCE_MODE="false"
 FORCE_SECRET_KEY=""       # If empty in force mode → will ask interactively
-FORCE_NODE_PORT=""        # If empty in force mode → uses default 3000
+FORCE_NODE_PORT=""        # If empty in force mode → uses default 2222
 FORCE_XTLS_PORT=""        # If empty in force mode → uses default 61000
 FORCE_INSTALL_XRAY=""     # If empty in force mode → skip xray installation
 
@@ -1025,7 +1025,7 @@ auto_collect_inputs() {
     echo -e "\033[38;5;8m$(printf '─%.0s' $(seq 1 60))\033[0m"
     echo -e "\033[1;37m  📋 Plan:\033[0m"
     echo -e "\033[38;5;8m$(printf '─%.0s' $(seq 1 60))\033[0m"
-    printf "   \033[38;5;15m%-26s\033[0m \033[38;5;250m%s\033[0m\n" "RemnaNode:" "install on port 3000 (default)"
+    printf "   \033[38;5;15m%-26s\033[0m \033[38;5;250m%s\033[0m\n" "RemnaNode:" "install on port 2222 (default)"
     printf "   \033[38;5;15m%-26s\033[0m \033[38;5;250m%s\033[0m\n" "XTLS_API_PORT:" "61000 (default)"
     printf "   \033[38;5;15m%-26s\033[0m \033[38;5;250m%s\033[0m\n" "Xray-core (separate):" "skip (image already includes Xray)"
     if [ "$AUTO_INSTALL_SELFSTEAL" = "true" ]; then
@@ -1038,7 +1038,7 @@ auto_collect_inputs() {
     printf "   \033[38;5;15m%-26s\033[0m \033[38;5;250m%s\033[0m\n" "BBR + CAKE:" "enable"
     printf "   \033[38;5;15m%-26s\033[0m \033[38;5;250m%s\033[0m\n" "IPv6:" "disable"
     printf "   \033[38;5;15m%-26s\033[0m \033[38;5;250m%s\033[0m\n" "UFW SSH:" "${AUTO_SSH_PORT}/tcp"
-    printf "   \033[38;5;15m%-26s\033[0m \033[38;5;250m%s\033[0m\n" "UFW node port:" "3000/tcp from ${AUTO_PANEL_IP}"
+    printf "   \033[38;5;15m%-26s\033[0m \033[38;5;250m%s\033[0m\n" "UFW node port:" "${NODE_PORT:-2222}/tcp from ${AUTO_PANEL_IP}"
     printf "   \033[38;5;15m%-26s\033[0m \033[38;5;250m%s\033[0m\n" "UFW Xray Reality:" "443/tcp"
     echo
     read -rp "$(echo -e "\033[38;5;244mPress Enter to start, or Ctrl+C to abort...\033[0m")"
@@ -2791,8 +2791,8 @@ install_remnanode() {
         fi
         colorized_echo green "✅ Using NODE_PORT: $NODE_PORT"
     elif [ "$FORCE_MODE" == "true" ] || [ "$AUTO_MODE" == "true" ]; then
-        # Force/auto mode without explicit port: use default 3000
-        NODE_PORT=3000
+        # Force/auto mode without explicit port: use default 2222
+        NODE_PORT=2222
         if is_port_occupied "$NODE_PORT"; then
             colorized_echo red "❌ Default NODE_PORT $NODE_PORT is already in use!"
             colorized_echo yellow "   Use --port=PORT to specify a different port"
@@ -2801,8 +2801,8 @@ install_remnanode() {
         colorized_echo green "✅ Using default NODE_PORT: $NODE_PORT"
     else
         while true; do
-            read -p "Enter the NODE_PORT (default 3000): " -r NODE_PORT
-            NODE_PORT=${NODE_PORT:-3000}
+            read -p "Enter the NODE_PORT (default 2222): " -r NODE_PORT
+            NODE_PORT=${NODE_PORT:-2222}
             
             if validate_port "$NODE_PORT"; then
                 if is_port_occupied "$NODE_PORT"; then
@@ -3828,7 +3828,7 @@ migrate_to_env_file() {
     # Создаем .env файл
     cat > "$ENV_FILE" <<EOL
 ### NODE ###
-NODE_PORT=${node_port:-3000}
+NODE_PORT=${node_port:-2222}
 
 ### XRAY ###
 SECRET_KEY=$secret_key
@@ -5511,7 +5511,7 @@ edit_env_command() {
             colorized_echo blue "Creating .env file template..."
             cat > "$ENV_FILE" <<EOL
 ### NODE ###
-NODE_PORT=3000
+NODE_PORT=2222
 
 ### XRAY ###
 SECRET_KEY=
@@ -5545,7 +5545,7 @@ ports_command() {
     if [ -z "$node_port" ]; then
         node_port=$(get_env_variable "APP_PORT")
     fi
-    printf "   \033[38;5;15m%-22s\033[0m \033[38;5;250m%s\033[0m\n" "NODE_PORT:" "${node_port:-3000 (default)}"
+    printf "   \033[38;5;15m%-22s\033[0m \033[38;5;250m%s\033[0m\n" "NODE_PORT:" "${node_port:-2222 (default)}"
     
     # Internal port (only XTLS_API_PORT is configurable since node v2.5.0)
     echo
@@ -5581,7 +5581,7 @@ ports_command() {
     # Show connection info
     echo
     echo -e "\033[1;37m📋 Connection Info:\033[0m"
-    printf "   \033[38;5;15m%-22s\033[0m \033[38;5;117m%s:%s\033[0m\n" "Node Address:" "$NODE_IP" "${node_port:-3000}"
+    printf "   \033[38;5;15m%-22s\033[0m \033[38;5;117m%s:%s\033[0m\n" "Node Address:" "$NODE_IP" "${node_port:-2222}"
     
     echo
     echo -e "\033[38;5;8m$(printf '─%.0s' $(seq 1 50))\033[0m"
@@ -5876,7 +5876,7 @@ usage() {
     printf "   \033[38;5;244m%-22s\033[0m %s\n" "--domain=DOMAIN" "Selfsteal domain (for --auto)"
     printf "   \033[38;5;244m%-22s\033[0m %s\n" "--panel-ip=IP" "Remnawave Panel IP for UFW (for --auto*)"
     printf "   \033[38;5;244m%-22s\033[0m %s\n" "--ssh-port=PORT" "SSH port for UFW (default: 22)"
-    printf "   \033[38;5;244m%-22s\033[0m %s\n" "--port=PORT" "Set NODE_PORT (default: 3000)"
+    printf "   \033[38;5;244m%-22s\033[0m %s\n" "--port=PORT" "Set NODE_PORT (default: 2222)"
     printf "   \033[38;5;244m%-22s\033[0m %s\n" "--xtls-port=PORT" "Set XTLS_API_PORT (default: 61000)"
     printf "   \033[38;5;244m%-22s\033[0m %s\n" "--xray" "Install latest Xray-core"
     printf "   \033[38;5;244m%-22s\033[0m %s\n" "--no-xray" "Skip Xray-core (default in force/auto mode)"
