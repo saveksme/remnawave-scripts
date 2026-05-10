@@ -28,6 +28,18 @@ FORCE_XTLS_PORT=""        # If empty in force mode → uses default 61000
 FORCE_INSTALL_XRAY=""     # If empty in force mode → skip xray installation
 
 # ============================================
+# Auto mode variables (минимум вопросов, все интеграции автоматически)
+# --auto              → нода + selfsteal + все интеграции (fail2ban, tblocker, BBR+CAKE, IPv6 off, UFW)
+# --auto-no-selfsteal → то же, но без selfsteal
+# Любой из CLI-флагов (--secret-key, --domain, --panel-ip, --ssh-port) пропускает соответствующий вопрос
+# ============================================
+AUTO_MODE="false"
+AUTO_INSTALL_SELFSTEAL="false"
+AUTO_DOMAIN=""            # Домен для selfsteal (--domain или интерактивный)
+AUTO_PANEL_IP=""          # IP панели для UFW (--panel-ip или интерактивный)
+AUTO_SSH_PORT=""          # SSH порт для UFW (--ssh-port или интерактивный, default 22)
+
+# ============================================
 # Auto-restart variables
 # ============================================
 AUTORESTART_SUBCOMMAND=""
@@ -47,6 +59,107 @@ while [[ $# -gt 0 ]]; do
                 exit 1
             fi
             shift
+        ;;
+        --auto)
+            if [[ "$COMMAND" == "install" ]]; then
+                AUTO_MODE="true"
+                AUTO_INSTALL_SELFSTEAL="true"
+            else
+                echo "Error: --auto parameter is only allowed with 'install' command."
+                exit 1
+            fi
+            shift
+        ;;
+        --auto-no-selfsteal)
+            if [[ "$COMMAND" == "install" ]]; then
+                AUTO_MODE="true"
+                AUTO_INSTALL_SELFSTEAL="false"
+            else
+                echo "Error: --auto-no-selfsteal parameter is only allowed with 'install' command."
+                exit 1
+            fi
+            shift
+        ;;
+        --domain)
+            if [[ "$COMMAND" == "install" ]]; then
+                if [[ -n "$2" && ! "$2" =~ ^-- ]]; then
+                    AUTO_DOMAIN="$2"
+                    shift 2
+                else
+                    echo "Error: --domain requires a value."
+                    exit 1
+                fi
+            else
+                echo "Error: --domain parameter is only allowed with 'install' command."
+                exit 1
+            fi
+        ;;
+        --domain=*)
+            if [[ "$COMMAND" == "install" ]]; then
+                AUTO_DOMAIN="${1#*=}"
+                if [ -z "$AUTO_DOMAIN" ]; then
+                    echo "Error: --domain requires a value."
+                    exit 1
+                fi
+                shift
+            else
+                echo "Error: --domain parameter is only allowed with 'install' command."
+                exit 1
+            fi
+        ;;
+        --panel-ip)
+            if [[ "$COMMAND" == "install" ]]; then
+                if [[ -n "$2" && ! "$2" =~ ^-- ]]; then
+                    AUTO_PANEL_IP="$2"
+                    shift 2
+                else
+                    echo "Error: --panel-ip requires a value."
+                    exit 1
+                fi
+            else
+                echo "Error: --panel-ip parameter is only allowed with 'install' command."
+                exit 1
+            fi
+        ;;
+        --panel-ip=*)
+            if [[ "$COMMAND" == "install" ]]; then
+                AUTO_PANEL_IP="${1#*=}"
+                if [ -z "$AUTO_PANEL_IP" ]; then
+                    echo "Error: --panel-ip requires a value."
+                    exit 1
+                fi
+                shift
+            else
+                echo "Error: --panel-ip parameter is only allowed with 'install' command."
+                exit 1
+            fi
+        ;;
+        --ssh-port)
+            if [[ "$COMMAND" == "install" ]]; then
+                if [[ -n "$2" && "$2" =~ ^[0-9]+$ ]]; then
+                    AUTO_SSH_PORT="$2"
+                    shift 2
+                else
+                    echo "Error: --ssh-port requires a valid port number."
+                    exit 1
+                fi
+            else
+                echo "Error: --ssh-port parameter is only allowed with 'install' command."
+                exit 1
+            fi
+        ;;
+        --ssh-port=*)
+            if [[ "$COMMAND" == "install" ]]; then
+                AUTO_SSH_PORT="${1#*=}"
+                if ! [[ "$AUTO_SSH_PORT" =~ ^[0-9]+$ ]]; then
+                    echo "Error: --ssh-port requires a valid port number."
+                    exit 1
+                fi
+                shift
+            else
+                echo "Error: --ssh-port parameter is only allowed with 'install' command."
+                exit 1
+            fi
         ;;
         --secret-key|--secret|--key)
             if [[ "$COMMAND" == "install" ]]; then
@@ -766,6 +879,25 @@ install_selfsteal() {
     fi
 }
 
+# Install selfsteal (Caddy-based) non-interactively with a pre-supplied domain
+install_selfsteal_with_domain() {
+    local domain="$1"
+    if [ -z "$domain" ]; then
+        colorized_echo red "❌ install_selfsteal_with_domain: domain is required"
+        return 1
+    fi
+    echo
+    colorized_echo cyan "🚀 Installing Selfsteal (Caddy) for $domain..."
+    echo
+    if bash <(curl -Ls https://github.com/DigneZzZ/remnawave-scripts/raw/main/selfsteal.sh) @ install --caddy --force --domain "$domain"; then
+        colorized_echo green "✅ Selfsteal (Caddy) installed successfully"
+        return 0
+    else
+        colorized_echo red "❌ Selfsteal installation failed"
+        return 1
+    fi
+}
+
 # Detect actual HTTPS port of caddy-selfsteal
 get_caddy_https_port() {
     local port
@@ -814,6 +946,104 @@ print_caddy_reality_hint() {
     colorized_echo gray "   (Caddy listens on 127.0.0.1:${port})"
 }
 
+# Collect minimal interactive inputs for --auto / --auto-no-selfsteal modes.
+# Reads only what isn't already supplied via CLI flags (--secret-key, --panel-ip, --ssh-port, --domain).
+# Fills FORCE_SECRET_KEY, AUTO_PANEL_IP, AUTO_SSH_PORT (default 22), AUTO_DOMAIN (only if selfsteal enabled).
+auto_collect_inputs() {
+    echo
+    echo -e "\033[1;37m⚡ Auto-install — minimum questions, all integrations enabled\033[0m"
+    echo -e "\033[38;5;8m$(printf '─%.0s' $(seq 1 60))\033[0m"
+    if [ "$AUTO_INSTALL_SELFSTEAL" = "true" ]; then
+        colorized_echo gray "   Mode: --auto (RemnaNode + Selfsteal Caddy + fail2ban + tblocker + BBR/CAKE + IPv6 off + UFW)"
+    else
+        colorized_echo gray "   Mode: --auto-no-selfsteal (RemnaNode + fail2ban + tblocker + BBR/CAKE + IPv6 off + UFW)"
+    fi
+    echo
+
+    # 1) SECRET_KEY (multi-line paste, blank line ends input)
+    if [ -z "$FORCE_SECRET_KEY" ]; then
+        colorized_echo blue "📋 Paste SECRET_KEY from Remnawave Panel, then press ENTER on an empty line:"
+        local key_value=""
+        local line
+        while IFS= read -r line; do
+            if [[ -z $line ]]; then
+                break
+            fi
+            key_value="$key_value$line"
+        done
+        if [ -z "$key_value" ]; then
+            colorized_echo red "❌ SECRET_KEY is required!"
+            exit 1
+        fi
+        FORCE_SECRET_KEY="$key_value"
+    else
+        colorized_echo green "✅ SECRET_KEY supplied via --secret-key"
+    fi
+    echo
+
+    # 2) Panel IP (for UFW allowlist on node port)
+    if [ -z "$AUTO_PANEL_IP" ]; then
+        while [ -z "$AUTO_PANEL_IP" ]; do
+            read -p "$(printf "   \033[38;5;15m%-26s\033[0m: " "Remnawave Panel IP")" AUTO_PANEL_IP
+            AUTO_PANEL_IP=$(echo "$AUTO_PANEL_IP" | tr -d '[:space:]')
+            if [ -z "$AUTO_PANEL_IP" ]; then
+                colorized_echo red "   Panel IP is required (UFW allowlist for node port)."
+            fi
+        done
+    else
+        colorized_echo green "✅ Panel IP supplied via --panel-ip: $AUTO_PANEL_IP"
+    fi
+
+    # 3) SSH port (default 22)
+    if [ -z "$AUTO_SSH_PORT" ]; then
+        read -p "$(printf "   \033[38;5;15m%-26s\033[0m [\033[38;5;117m22\033[0m]: " "SSH port")" AUTO_SSH_PORT
+        AUTO_SSH_PORT=${AUTO_SSH_PORT:-22}
+    else
+        colorized_echo green "✅ SSH port supplied via --ssh-port: $AUTO_SSH_PORT"
+    fi
+    if ! [[ "$AUTO_SSH_PORT" =~ ^[0-9]+$ ]] || [ "$AUTO_SSH_PORT" -lt 1 ] || [ "$AUTO_SSH_PORT" -gt 65535 ]; then
+        colorized_echo red "❌ Invalid SSH port: $AUTO_SSH_PORT"
+        exit 1
+    fi
+
+    # 4) Selfsteal domain (only if selfsteal mode)
+    if [ "$AUTO_INSTALL_SELFSTEAL" = "true" ]; then
+        if [ -z "$AUTO_DOMAIN" ]; then
+            while [ -z "$AUTO_DOMAIN" ]; do
+                read -p "$(printf "   \033[38;5;15m%-26s\033[0m: " "Selfsteal domain")" AUTO_DOMAIN
+                AUTO_DOMAIN=$(echo "$AUTO_DOMAIN" | tr -d '[:space:]')
+                if [ -z "$AUTO_DOMAIN" ]; then
+                    colorized_echo red "   Domain is required for selfsteal."
+                fi
+            done
+        else
+            colorized_echo green "✅ Selfsteal domain supplied via --domain: $AUTO_DOMAIN"
+        fi
+    fi
+
+    echo
+    echo -e "\033[38;5;8m$(printf '─%.0s' $(seq 1 60))\033[0m"
+    echo -e "\033[1;37m  📋 Plan:\033[0m"
+    echo -e "\033[38;5;8m$(printf '─%.0s' $(seq 1 60))\033[0m"
+    printf "   \033[38;5;15m%-26s\033[0m \033[38;5;250m%s\033[0m\n" "RemnaNode:" "install on port 3000 (default)"
+    printf "   \033[38;5;15m%-26s\033[0m \033[38;5;250m%s\033[0m\n" "XTLS_API_PORT:" "61000 (default)"
+    printf "   \033[38;5;15m%-26s\033[0m \033[38;5;250m%s\033[0m\n" "Xray-core (separate):" "skip (image already includes Xray)"
+    if [ "$AUTO_INSTALL_SELFSTEAL" = "true" ]; then
+        printf "   \033[38;5;15m%-26s\033[0m \033[38;5;250m%s\033[0m\n" "Selfsteal (Caddy):" "$AUTO_DOMAIN"
+    else
+        printf "   \033[38;5;15m%-26s\033[0m \033[38;5;250m%s\033[0m\n" "Selfsteal (Caddy):" "skip"
+    fi
+    printf "   \033[38;5;15m%-26s\033[0m \033[38;5;250m%s\033[0m\n" "fail2ban:" "install (defaults: 3600/600/5)"
+    printf "   \033[38;5;15m%-26s\033[0m \033[38;5;250m%s\033[0m\n" "Xray Torrent Blocker:" "install (iptables, 10 min ban)"
+    printf "   \033[38;5;15m%-26s\033[0m \033[38;5;250m%s\033[0m\n" "BBR + CAKE:" "enable"
+    printf "   \033[38;5;15m%-26s\033[0m \033[38;5;250m%s\033[0m\n" "IPv6:" "disable"
+    printf "   \033[38;5;15m%-26s\033[0m \033[38;5;250m%s\033[0m\n" "UFW SSH:" "${AUTO_SSH_PORT}/tcp"
+    printf "   \033[38;5;15m%-26s\033[0m \033[38;5;250m%s\033[0m\n" "UFW node port:" "3000/tcp from ${AUTO_PANEL_IP}"
+    printf "   \033[38;5;15m%-26s\033[0m \033[38;5;250m%s\033[0m\n" "UFW Xray Reality:" "443/tcp"
+    echo
+    read -rp "$(echo -e "\033[38;5;244mPress Enter to start, or Ctrl+C to abort...\033[0m")"
+}
+
 # Configure selfsteal integration after installation
 configure_selfsteal_integration() {
     echo
@@ -826,7 +1056,23 @@ configure_selfsteal_integration() {
     else
         colorized_echo gray "   Caddy selfsteal not detected"
         echo
-        if [ "$FORCE_MODE" != "true" ]; then
+        if [ "$AUTO_MODE" = "true" ]; then
+            if [ "$AUTO_INSTALL_SELFSTEAL" = "true" ]; then
+                if install_selfsteal_with_domain "$AUTO_DOMAIN"; then
+                    sleep 2
+                    if check_caddy_selfsteal; then
+                        colorized_echo green "✅ Caddy selfsteal запущен"
+                        echo
+                        print_caddy_reality_hint
+                    else
+                        colorized_echo yellow "⚠️  Контейнер caddy-selfsteal ещё не запущен. Проверьте статус:"
+                        colorized_echo white "   docker ps | grep caddy-selfsteal"
+                    fi
+                fi
+            else
+                colorized_echo gray "   Selfsteal пропущен (--auto-no-selfsteal)"
+            fi
+        elif [ "$FORCE_MODE" != "true" ]; then
             colorized_echo cyan "💡 Selfsteal позволяет использовать ваш SSL-сертификат как прикрытие для Xray Reality."
             read -p "Установить Selfsteal (Caddy) прямо сейчас? [y/N]: " -r install_ss
             if [[ $install_ss =~ ^[Yy]$ ]]; then
@@ -1086,6 +1332,24 @@ configure_fail2ban_integration() {
             systemctl start fail2ban >/dev/null 2>&1
         else
             colorized_echo green "   Сервис активен"
+        fi
+        return 0
+    fi
+
+    if [ "$AUTO_MODE" = "true" ]; then
+        colorized_echo cyan "📦 Устанавливаем fail2ban (auto-режим, defaults: 3600/600/5)..."
+        if ! install_fail2ban_pkg; then
+            colorized_echo red "❌ Ошибка установки fail2ban"
+            return 1
+        fi
+        write_fail2ban_config "3600" "600" "5"
+        systemctl enable fail2ban >/dev/null 2>&1
+        systemctl restart fail2ban >/dev/null 2>&1
+        sleep 1
+        if is_fail2ban_running; then
+            colorized_echo green "✅ Fail2ban установлен и запущен"
+        else
+            colorized_echo yellow "⚠️  Fail2ban установлен, но сервис не запустился"
         fi
         return 0
     fi
@@ -1511,6 +1775,16 @@ configure_torrent_blocker_integration() {
         else
             colorized_echo yellow "   Установлен, но не запущен. Запускаем..."
             systemctl start "$TBLOCKER_SERVICE" 2>/dev/null
+        fi
+        return 0
+    fi
+
+    if [ "$AUTO_MODE" = "true" ]; then
+        colorized_echo cyan "📦 Устанавливаем Xray Torrent Blocker (auto-режим, defaults)..."
+        if install_torrent_blocker "$LOG_DIR/access.log" "10" "TORRENT" "iptables"; then
+            colorized_echo green "✅ Xray Torrent Blocker установлен и запущен"
+        else
+            colorized_echo yellow "⚠️  Установлен, но сервис не запустился"
         fi
         return 0
     fi
@@ -2017,6 +2291,15 @@ configure_bbr_cake_integration() {
         return 0
     fi
 
+    if [ "$AUTO_MODE" = "true" ]; then
+        colorized_echo cyan "⚡ Включаем BBR + CAKE (auto-режим)..."
+        enable_bbr_cake
+        local qdisc
+        qdisc=$(sysctl -n net.core.default_qdisc 2>/dev/null)
+        colorized_echo green "✅ BBR активирован (qdisc: $qdisc)"
+        return 0
+    fi
+
     if [ "$FORCE_MODE" = "true" ]; then
         colorized_echo gray "   Пропуск (автоматический режим)"
         return 0
@@ -2044,6 +2327,13 @@ configure_ipv6_integration() {
 
     if is_ipv6_disabled; then
         colorized_echo green "✅ IPv6 уже отключён"
+        return 0
+    fi
+
+    if [ "$AUTO_MODE" = "true" ]; then
+        colorized_echo cyan "🔕 Отключаем IPv6 (auto-режим)..."
+        disable_ipv6
+        colorized_echo green "✅ IPv6 отключён"
         return 0
     fi
 
@@ -2243,6 +2533,27 @@ configure_ufw_integration() {
     echo
     echo -e "\033[1;37m🔥 UFW Firewall — защита портов сервера\033[0m"
     echo -e "\033[38;5;8m$(printf '─%.0s' $(seq 1 55))\033[0m"
+
+    if [ "$AUTO_MODE" = "true" ]; then
+        local _ssh="${AUTO_SSH_PORT:-22}"
+        local _panel="$AUTO_PANEL_IP"
+        colorized_echo cyan "🔧 Настройка UFW (auto-режим): SSH=${_ssh}/tcp, node=${NODE_PORT}/tcp from ${_panel}, 443/tcp"
+        if ! is_ufw_installed; then
+            colorized_echo cyan "📦 Устанавливаем ufw..."
+            if ! install_ufw_pkg; then
+                colorized_echo red "❌ Не удалось установить ufw"
+                return 1
+            fi
+        fi
+        apply_ufw_rules "$_ssh" "$_panel" "$NODE_PORT" "true" ""
+        if is_ufw_active; then
+            colorized_echo green "✅ UFW активен"
+            ufw status numbered 2>/dev/null | head -20
+        else
+            colorized_echo yellow "⚠️  UFW включён, но статус не определён"
+        fi
+        return 0
+    fi
 
     if [ "$FORCE_MODE" = "true" ]; then
         colorized_echo gray "   Пропуск настройки UFW (автоматический режим)"
@@ -2479,8 +2790,8 @@ install_remnanode() {
             exit 1
         fi
         colorized_echo green "✅ Using NODE_PORT: $NODE_PORT"
-    elif [ "$FORCE_MODE" == "true" ]; then
-        # Force mode without explicit port: use default 3000
+    elif [ "$FORCE_MODE" == "true" ] || [ "$AUTO_MODE" == "true" ]; then
+        # Force/auto mode without explicit port: use default 3000
         NODE_PORT=3000
         if is_port_occupied "$NODE_PORT"; then
             colorized_echo red "❌ Default NODE_PORT $NODE_PORT is already in use!"
@@ -2524,8 +2835,8 @@ install_remnanode() {
             exit 1
         fi
         colorized_echo green "✅ Using XTLS_API_PORT: $XTLS_API_PORT"
-    elif [ "$FORCE_MODE" == "true" ]; then
-        # Force mode without explicit port: use default
+    elif [ "$FORCE_MODE" == "true" ] || [ "$AUTO_MODE" == "true" ]; then
+        # Force/auto mode without explicit port: use default
         XTLS_API_PORT=$DEFAULT_XTLS_API_PORT
         if is_port_occupied "$XTLS_API_PORT"; then
             colorized_echo red "❌ Default XTLS_API_PORT $XTLS_API_PORT is already in use!"
@@ -2599,8 +2910,8 @@ install_remnanode() {
         colorized_echo green "✅ Installing Xray-core (--xray flag)"
         INSTALL_XRAY=true
         install_latest_xray_core
-    elif [ "$FORCE_INSTALL_XRAY" == "false" ] || [ "$FORCE_MODE" == "true" ]; then
-        # Force mode defaults to NOT installing Xray-core
+    elif [ "$FORCE_INSTALL_XRAY" == "false" ] || [ "$FORCE_MODE" == "true" ] || [ "$AUTO_MODE" == "true" ]; then
+        # Force/auto mode defaults to NOT installing Xray-core
         colorized_echo gray "ℹ️  Skipping Xray-core installation (use --xray to install)"
         INSTALL_XRAY=false
     else
@@ -2922,8 +3233,8 @@ install_command() {
     check_running_as_root
     if is_remnanode_installed; then
         colorized_echo red "Remnanode is already installed at $APP_DIR"
-        if [ "$FORCE_MODE" == "true" ]; then
-            colorized_echo yellow "⚠️  Force mode: overriding existing installation"
+        if [ "$FORCE_MODE" == "true" ] || [ "$AUTO_MODE" == "true" ]; then
+            colorized_echo yellow "⚠️  Force/auto mode: overriding existing installation"
         else
             read -p "Do you want to override the previous installation? (y/n) "
             if [[ ! $REPLY =~ ^[Yy]$ ]]; then
@@ -2932,6 +3243,12 @@ install_command() {
             fi
         fi
     fi
+
+    # Auto mode: collect ALL interactive inputs upfront in one block
+    if [ "$AUTO_MODE" = "true" ]; then
+        auto_collect_inputs
+    fi
+
     detect_os
     if ! command -v curl >/dev/null 2>&1; then
         install_package curl
@@ -3019,8 +3336,12 @@ install_command() {
     print_xray_profile_config
 
     echo
-    read -rp "$(echo -e "\033[38;5;244mНажмите Enter чтобы посмотреть логи контейнера (Ctrl+C чтобы выйти)...\033[0m")"
-    follow_remnanode_logs
+    if [ "$AUTO_MODE" = "true" ] || [ "$FORCE_MODE" = "true" ]; then
+        colorized_echo gray "   Установка завершена. Логи: $APP_NAME logs"
+    else
+        read -rp "$(echo -e "\033[38;5;244mНажмите Enter чтобы посмотреть логи контейнера (Ctrl+C чтобы выйти)...\033[0m")"
+        follow_remnanode_logs
+    fi
 }
 
 uninstall_command() {
@@ -5548,14 +5869,19 @@ usage() {
     echo
 
     echo -e "\033[1;37m🎯 Install Options:\033[0m"
-    printf "   \033[38;5;244m%-18s\033[0m %s\n" "--force, -f" "Non-interactive mode (skip confirmations)"
-    printf "   \033[38;5;244m%-18s\033[0m %s\n" "--secret-key=KEY" "Set SECRET_KEY from panel"
-    printf "   \033[38;5;244m%-18s\033[0m %s\n" "--port=PORT" "Set NODE_PORT (default: 3000)"
-    printf "   \033[38;5;244m%-18s\033[0m %s\n" "--xtls-port=PORT" "Set XTLS_API_PORT (default: 61000)"
-    printf "   \033[38;5;244m%-18s\033[0m %s\n" "--xray" "Install latest Xray-core"
-    printf "   \033[38;5;244m%-18s\033[0m %s\n" "--no-xray" "Skip Xray-core (default in force mode)"
-    printf "   \033[38;5;244m%-18s\033[0m %s\n" "--name NAME" "Custom installation name"
-    printf "   \033[38;5;244m%-18s\033[0m %s\n" "--dev" "Use development image"
+    printf "   \033[38;5;244m%-22s\033[0m %s\n" "--force, -f" "Non-interactive mode (skip confirmations)"
+    printf "   \033[38;5;244m%-22s\033[0m %s\n" "--auto" "Auto-install: node + selfsteal + all integrations"
+    printf "   \033[38;5;244m%-22s\033[0m %s\n" "--auto-no-selfsteal" "Auto-install: node + all integrations (no selfsteal)"
+    printf "   \033[38;5;244m%-22s\033[0m %s\n" "--secret-key=KEY" "Set SECRET_KEY from panel"
+    printf "   \033[38;5;244m%-22s\033[0m %s\n" "--domain=DOMAIN" "Selfsteal domain (for --auto)"
+    printf "   \033[38;5;244m%-22s\033[0m %s\n" "--panel-ip=IP" "Remnawave Panel IP for UFW (for --auto*)"
+    printf "   \033[38;5;244m%-22s\033[0m %s\n" "--ssh-port=PORT" "SSH port for UFW (default: 22)"
+    printf "   \033[38;5;244m%-22s\033[0m %s\n" "--port=PORT" "Set NODE_PORT (default: 3000)"
+    printf "   \033[38;5;244m%-22s\033[0m %s\n" "--xtls-port=PORT" "Set XTLS_API_PORT (default: 61000)"
+    printf "   \033[38;5;244m%-22s\033[0m %s\n" "--xray" "Install latest Xray-core"
+    printf "   \033[38;5;244m%-22s\033[0m %s\n" "--no-xray" "Skip Xray-core (default in force/auto mode)"
+    printf "   \033[38;5;244m%-22s\033[0m %s\n" "--name NAME" "Custom installation name"
+    printf "   \033[38;5;244m%-22s\033[0m %s\n" "--dev" "Use development image"
     echo
 
     echo -e "\033[1;37m⚙️  Service Control:\033[0m"
@@ -5609,15 +5935,18 @@ usage() {
     echo -e "\033[38;5;8m$(printf '─%.0s' $(seq 1 55))\033[0m"
     echo -e "\033[1;37m📖 Examples:\033[0m"
     echo -e "\033[38;5;244m   sudo $APP_NAME install\033[0m"
+    echo -e "\033[38;5;244m   sudo $APP_NAME install --auto                # asks: key, panel IP, ssh port, domain\033[0m"
+    echo -e "\033[38;5;244m   sudo $APP_NAME install --auto-no-selfsteal   # asks: key, panel IP, ssh port\033[0m"
+    echo -e "\033[38;5;244m   sudo $APP_NAME install --auto --secret-key=\"KEY\" --domain=reality.example.com --panel-ip=1.2.3.4\033[0m"
     echo -e "\033[38;5;244m   sudo $APP_NAME install --force --secret-key=\"eyJ...\"\033[0m"
-    echo -e "\033[38;5;244m   sudo $APP_NAME install -f --secret-key=\"KEY\" --port=3001 --xray\033[0m"
     echo -e "\033[38;5;244m   sudo $APP_NAME core-update\033[0m"
     echo -e "\033[38;5;244m   $APP_NAME logs\033[0m"
     echo -e "\033[38;5;244m   $APP_NAME menu           # Interactive menu\033[0m"
     echo -e "\033[38;5;244m   $APP_NAME                # Same as menu\033[0m"
     echo
-    echo -e "\033[1;37m📡 One-liner Force Install:\033[0m"
-    echo -e "\033[38;5;117m   bash <(curl -Ls URL) @ install --force --secret-key=\"KEY\"\033[0m"
+    echo -e "\033[1;37m📡 One-liner Auto Install:\033[0m"
+    echo -e "\033[38;5;117m   bash <(curl -Ls URL) @ install --auto-no-selfsteal --secret-key=\"KEY\" --panel-ip=1.2.3.4\033[0m"
+    echo -e "\033[38;5;117m   bash <(curl -Ls URL) @ install --auto --secret-key=\"KEY\" --domain=DOMAIN --panel-ip=IP\033[0m"
     echo
     echo -e "\033[38;5;8m$(printf '─%.0s' $(seq 1 55))\033[0m"
     echo -e "\033[38;5;8m📚 Project: \033[38;5;250mhttps://gig.ovh\033[0m"
